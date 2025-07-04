@@ -1,8 +1,8 @@
 {
+	required_plantuml_versions ? ["v1.2025.4" "v1.2025.3"],
+	required_recharts_versions ? [],
 }:
 let
-	required_plantuml_versions = ["v1.2025.4" "v1.2025.3"];
-	required_recharts_versions = [];
   nixpkgs = fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.05";
   pkgs = import nixpkgs { config = {}; overlays = []; };
 
