@@ -1,0 +1,6 @@
+console.log(JSON.stringify([{"renderer": "plantuml-v1.2025.4", "code": `
+@startuml
+a -> b
+
+@enduml
+`}]))

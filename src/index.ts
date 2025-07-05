@@ -32,6 +32,8 @@ if (availableRenderers === undefined || availableRenderers === null) {
 	throw new Error("AVAILABLE_RENDERERS undefined");
 }
 
+const extractSvg = (str: string) => str.match(/<svg.*<\/svg>/s)?.[0];
+
 const render = async (codes: string[], renderer: string) => {
 	if (renderer.match(plantumlDepPattern)) {
 		const {version} = renderer.match(plantumlDepPattern)!.groups!;
@@ -41,7 +43,10 @@ const render = async (codes: string[], renderer: string) => {
 			const usedRenderer = availableRenderers["plantuml"].find((r) => r.version === version)!;
 			const res = await util.promisify(child_process.execFile)(usedRenderer.bin, [".", "-tsvg", "-o", "out", "-nometadata"], {env: {"JAVA_TOOL_OPTIONS": `-XX:+SuppressFatalErrorMessage -Djava.io.tmpdir=${os.tmpdir()} -Djava.aws.headless=true`, "PLANTUML_SECURITY_PROFILE": "SANDBOX", PATH: process.env["PATH"], GRAPHVIZ_DOT: process.env["GRAPHVIZ_DOT"]}, cwd});
 			try {
-				return await Promise.all(codes.map(async (_code, i) => fs.readFile(path.join(cwd, "out", `in_${i}.svg`), "utf8")));
+				return await Promise.all(codes.map(async (_code, i) => {
+					const contents = await fs.readFile(path.join(cwd, "out", `in_${i}.svg`), "utf8")
+					return extractSvg(contents);
+				}));
 			}catch (e) {
 				throw new Error(`Plantuml generation failed. info: ${JSON.stringify({renderer, codes, res, e}, undefined, 4)}`);
 			}

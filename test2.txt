@@ -1,0 +1,34 @@
+console.log(JSON.stringify([{"renderer": "plantuml-v1.2025.4", "code": `
+@startuml
+digraph a {
+node [shape=plain,penwidth="0",fontname = "monospace"]
+Table [label=<
+<table border="0" cellborder="1" cellspacing="0">
+<tr><td colspan="4"><b>Users table</b></td></tr>
+<tr>
+<td bgcolor="#f0f8ff"><i>ID</i></td>
+<td bgcolor="#f0f8ff"><i>email</i></td>
+</tr>
+<tr><td>user1</td>
+<td port="0">test@example.com</td>
+</tr>
+<tr><td bgcolor="#90EE90">user2</td>
+<td port="0" bgcolor="#90EE90">other@example.com</td>
+</tr>
+</table>>];
+
+Counts [label=<
+<table border="0" cellborder="1" cellspacing="0">
+<tr><td colspan="4"><b>Counts table</b></td></tr>
+<tr>
+<td bgcolor="#f0f8ff"><i>type (PK)</i></td>
+<td bgcolor="#f0f8ff"><i>count</i></td>
+</tr>
+<tr><td port="0">users</td>
+<td bgcolor="#90EE90"><s>1</s><br/>2</td>
+</tr>
+</table>>];
+}
+
+@enduml
+`}]))
