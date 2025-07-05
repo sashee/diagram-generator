@@ -33,7 +33,7 @@ let
 
 		wrapper = pkgs.runCommand "recharts" {} ''
 mkdir $out
-ln -fs ${npmPackage}/lib/node_modules/2.15.4/node_modules $out/node_modules
+ln -fs ${npmPackage}/lib/node_modules/*/node_modules $out/node_modules
 cat << 'EOF' > $out/index.ts
 #!${pkgs.nodePackages_latest.nodejs}/bin/node
 
