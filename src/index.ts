@@ -104,9 +104,9 @@ const results = await Promise.all(renderGroups.map(async ([renderer, groups]) =>
 	})
 }));
 
-console.log(
+console.log(JSON.stringify(
 	results
 		.flat()
 		.toSorted((a, b) => a.index - b.index)
 		.map(({result}) => result)
-);
+));
