@@ -5,6 +5,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { text } from "node:stream/consumers";
+import stream from "node:stream";
 import assert from "node:assert/strict";
 
 const plantumlDepPattern = /^plantuml-(?<version>.*)$/;
@@ -31,7 +32,7 @@ if (availableRenderers === undefined || availableRenderers === null) {
 	throw new Error("AVAILABLE_RENDERERS undefined");
 }
 
-export const render = async (codes: string[], renderer: string) => {
+const render = async (codes: string[], renderer: string) => {
 	if (renderer.match(plantumlDepPattern)) {
 		const {version} = renderer.match(plantumlDepPattern)!.groups!;
 		return withTempDir(async (cwd) => {
@@ -46,8 +47,18 @@ export const render = async (codes: string[], renderer: string) => {
 			}
 		});
 	}else if (renderer.match(rechartsDepPattern)) {
-		//return availableRenderers.recharts[renderer].renderRecharts(code);
-		throw new Error(`Not supported renderer: ${renderer}`);
+		const {version} = renderer.match(rechartsDepPattern)!.groups!;
+		const usedRenderer = availableRenderers["recharts"].find((r) => r.version === version)!;
+
+		return await Promise.all(codes.map(async (code) => {
+			const prom = util.promisify(child_process.execFile)(usedRenderer.bin);
+			const stdinStream = new stream.Readable();
+			stdinStream.push(code);
+			stdinStream.push(null);
+			stdinStream.pipe(prom.child.stdin);
+			const res = await prom;
+			return res.stdout.trim();
+		}));
 	}else {
 		throw new Error(`Not supported renderer: ${renderer}`);
 	}
