@@ -3,7 +3,7 @@
 		version
 	}:
 	let
-		pkgs = import (fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-24.11") {};
+		pkgs = import (fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.05") {};
 		wrapper = (import ./v1.2025.4.nix).makewrapper {
 			pkgs = pkgs;
 			src = pkgs.fetchurl {

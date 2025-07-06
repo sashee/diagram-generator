@@ -41,7 +41,20 @@ const render = async (codes: string[], renderer: string) => {
 			await Promise.all(codes.map(async (code, i) => fs.writeFile(path.join(cwd, `in_${i}.puml`), code, "utf8")));
 
 			const usedRenderer = availableRenderers["plantuml"].find((r) => r.version === version)!;
-			const res = await util.promisify(child_process.execFile)(usedRenderer.bin, [".", "-tsvg", "-o", "out", "-nometadata"], {env: {"JAVA_TOOL_OPTIONS": `-XX:+SuppressFatalErrorMessage -Djava.io.tmpdir=${os.tmpdir()} -Djava.aws.headless=true`, "PLANTUML_SECURITY_PROFILE": "SANDBOX", PATH: process.env["PATH"], GRAPHVIZ_DOT: process.env["GRAPHVIZ_DOT"]}, cwd});
+			/*
+			{
+				const res = await util.promisify(child_process.execFile)(usedRenderer.bin, [".", "-tpng", "-o", "out2", "-nometadata"], {env: {"PLANTUML_LIMIT_SIZE": "81920"}, cwd});
+				console.log(JSON.stringify(res, undefined,4))
+				await Promise.all(codes.map(async (_code, i) => {
+					console.log(await fs.readdir(path.join(cwd, "out2")));
+					const id = crypto.randomUUID();
+					await fs.copyFile(path.join(cwd, "out2", `in_${i}.png`), path.join("/", "tmp", `in_${i}_${id}.png`));
+					console.log(`file:///tmp/in_${i}_${id}.png`);
+				}));
+			}
+			return null;
+			*/
+			const res = await util.promisify(child_process.execFile)(usedRenderer.bin, [".", "-tsvg", "-o", "out", "-nometadata"], {cwd});
 			try {
 				return await Promise.all(codes.map(async (_code, i) => {
 					const contents = await fs.readFile(path.join(cwd, "out", `in_${i}.svg`), "utf8")

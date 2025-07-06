@@ -1,0 +1,31 @@
+console.log(JSON.stringify([{"renderer": "plantuml-v1.2025.4", "code": `
+@startuml
+caption Both doctors are removed from on-call\\nbecause the two transactions change different rows
+
+map Doctors {
+ doctor1 => on-call
+ doctor2 => on-call
+}
+
+map T1.Doctors {
+ doctor1 => reserve
+ doctor2 => on-call
+}
+
+map T2.Doctors {
+ doctor1 => on-call
+ doctor2 => reserve
+}
+
+map After.Doctors {
+ doctor1 => reserve
+ doctor2 => reserve
+}
+
+Doctors --> T1.Doctors: length(on-call) > 1
+Doctors --> T2.Doctors: length(on-call) > 1
+T1.Doctors --> After.Doctors
+T2.Doctors --> After.Doctors
+
+@enduml
+`}]))
