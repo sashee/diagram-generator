@@ -1,0 +1,23 @@
+console.log(JSON.stringify([{"renderer": "plantuml-v1.2025.3", "code": `
+@startuml
+caption Direct access
+skinparam linetype polyline
+
+!include <awslib14/AWSCommon>
+!include <awslib14/AWSSimplified>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementRole>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementTemporarySecurityCredential>
+!include <awslib14/ApplicationIntegration/APIGateway>
+!include <awslib14/Storage/SimpleStorageServiceBucket>
+!include <awslib14/Compute/EC2>
+
+actor "Visitor" as visitor
+EC2(ec2, "Servers", "")
+SimpleStorageServiceBucket(s3, "Static assets", "")
+APIGateway(api, "API", "")
+
+visitor --> ec2: 10.0.0.1
+visitor --> s3: example.com
+visitor --> api: ...execute-api.amazonaws.com
+@enduml
+`}]))

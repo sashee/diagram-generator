@@ -1,0 +1,181 @@
+@startuml
+digraph a {
+node [shape=plain,penwidth="0",fontname = "monospace"]
+Table [label=<
+<table border="0" cellborder="1" cellspacing="0">
+<tr><td colspan="4"><b>Users table</b></td></tr>
+<tr>
+<td bgcolor="#f0f8ff"><i>ID</i></td>
+<td bgcolor="#f0f8ff"><i>email</i></td>
+</tr>
+<tr><td>user1</td>
+<td port="0">test@example.com</td>
+</tr>
+<tr><td bgcolor="#90EE90">user2</td>
+<td port="0" bgcolor="#90EE90">other@example.com</td>
+</tr>
+</table>>];
+
+Counts [label=<
+<table border="0" cellborder="1" cellspacing="0">
+<tr><td colspan="4"><b>Counts table</b></td></tr>
+<tr>
+<td bgcolor="#f0f8ff"><i>type (PK)</i></td>
+<td bgcolor="#f0f8ff"><i>count</i></td>
+</tr>
+<tr><td port="0">users</td>
+<td bgcolor="#90EE90"><s>1</s><br/>2</td>
+</tr>
+</table>>];
+}
+
+@enduml
+
+@startuml
+a -> b
+
+@enduml
+
+@startuml
+caption Both doctors are removed from on-call\\nbecause the two transactions change different rows
+
+map Doctors {
+ doctor1 => on-call
+ doctor2 => on-call
+}
+
+map T1.Doctors {
+ doctor1 => reserve
+ doctor2 => on-call
+}
+
+map T2.Doctors {
+ doctor1 => on-call
+ doctor2 => reserve
+}
+
+map After.Doctors {
+ doctor1 => reserve
+ doctor2 => reserve
+}
+
+Doctors --> T1.Doctors: length(on-call) > 1
+Doctors --> T2.Doctors: length(on-call) > 1
+T1.Doctors --> After.Doctors
+T2.Doctors --> After.Doctors
+
+@enduml
+@startuml
+listfonts
+@enduml
+@startuml
+caption Direct access
+skinparam linetype polyline
+
+!include <awslib14/AWSCommon>
+!include <awslib14/AWSSimplified>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementRole>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementTemporarySecurityCredential>
+!include <awslib14/ApplicationIntegration/APIGateway>
+!include <awslib14/Storage/SimpleStorageServiceBucket>
+!include <awslib14/Compute/EC2>
+
+actor "Visitor" as visitor
+EC2(ec2, "Servers", "")
+SimpleStorageServiceBucket(s3, "Static assets", "")
+APIGateway(api, "API", "")
+
+visitor --> ec2: 10.0.0.1
+visitor --> s3: example.com
+visitor --> api: ...execute-api.amazonaws.com
+@enduml
+
+@startuml
+caption Direct access
+skinparam linetype polyline
+
+!include <awslib14/AWSCommon>
+!include <awslib14/AWSSimplified>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementRole>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementTemporarySecurityCredential>
+!include <awslib14/ApplicationIntegration/APIGateway>
+!include <awslib14/Storage/SimpleStorageServiceBucket>
+!include <awslib14/Compute/EC2>
+
+actor "Visitor" as visitor
+EC2(ec2, "Servers", "")
+SimpleStorageServiceBucket(s3, "Static assets", "")
+APIGateway(api, "API", "")
+
+visitor --> ec2: 10.0.0.1
+visitor --> s3: example.com
+visitor --> api: ...execute-api.amazonaws.com
+
+@enduml
+@startuml
+
+!include <awslib14/AWSCommon>
+!include <awslib14/AWSSimplified>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementRole>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementPermissions>
+!include <awslib14/ApplicationIntegration/SimpleQueueServiceQueue>
+!include <awslib14/General/User>
+!include <awslib14/Storage/SimpleStorageServiceBucket>
+
+caption IAM policy types
+
+frame Account {
+    SimpleStorageServiceBucket(bucket, "Bucket","")
+    User(user, "User","")
+    IdentityAccessManagementRole(role, "Role","")
+    IdentityAccessManagementPermissions(session_policy, "Session Policy","")#d5e8d4
+    IdentityAccessManagementPermissions(permission_boundary, "Permission Boundary","")#dae8fc
+    permission_boundary -up- user
+    user -> session_policy: assume role
+    session_policy --> role: assume role
+    IdentityAccessManagementPermissions(resource_policy, "Resource Policy","")#e1d5e7
+    bucket -- resource_policy
+    IdentityAccessManagementPermissions(identity_policy, "Identity Policy","")#fff2cc
+    role -- identity_policy
+    role -> bucket: read
+
+}
+
+IdentityAccessManagementPermissions(scp, "Service Control Policy","")#ffe6cc
+scp -- Account
+
+@enduml
+@startuml
+
+!include <awslib14/AWSCommon>
+!include <awslib14/AWSSimplified>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementRole>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementTemporarySecurityCredential>
+!include <awslib14/ApplicationIntegration/APIGateway>
+!include <awslib14/Storage/SimpleStorageServiceBucket>
+!include <awslib14/Compute/EC2>
+
+caption Request forwarding
+
+actor visitor
+frame "Cache behaviors" {
+    component "/api/*" as api
+    component "*" as default
+}
+frame "Origins" {
+    component API as o_api
+    component bucket as o_bucket
+}
+
+APIGateway(apigw, "API","")
+SimpleStorageServiceBucket(bucket, "Bucket","")
+
+visitor --> api: /api/user
+api --> o_api: /api/user
+o_api --> apigw: /api/user
+
+visitor --> default: /index.html
+default --> o_bucket: /index.html
+o_bucket --> bucket: /index.html
+@enduml
+
