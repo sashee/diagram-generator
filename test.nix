@@ -2,7 +2,7 @@ let
   nixpkgs = fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.05";
   pkgs = import nixpkgs { config = {}; overlays = []; };
 
-	fontconfig = (import ./default-fontconfig.nix {inherit pkgs;});
+	fontconfig = (import ./tests/default-fontconfig.nix {inherit pkgs;});
 
 	diagram_generator = (import ./default.nix {inherit pkgs fontconfig;});
 
