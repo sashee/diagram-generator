@@ -1,5 +1,12 @@
 {
-	"plantuml": ["v1.2025.4", "v1.2025.3"],
-	"recharts": ["2.15.4"],
-	"swirly": ["0.21.0"]
+	"plantuml": [
+		{"version": "v1.2025.3", "formats": ["svg", "png"]},
+		{"version": "v1.2025.4", "formats": ["svg", "png"]}
+	],
+	"recharts": [
+		{"version": "2.15.4", "formats": ["svg"]}
+	],
+	"swirly": [
+		{"version": "0.21.0", "formats": ["svg"]}
+	]
 }

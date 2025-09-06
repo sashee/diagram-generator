@@ -26,9 +26,11 @@ const withTempDir = async <T> (fn: (path: string) => Promise<T>) => {
 };
 
 const availableRenderers = JSON.parse(process.env["AVAILABLE_RENDERERS"] ?? "null") as {
-	[renderer: string]: {
+	[engine: string]: {
 		bin: string,
 		version: string,
+		formats: string[],
+		renderer: string,
 	}[],
 } | undefined | null;
 if (availableRenderers === undefined || availableRenderers === null) {
@@ -37,11 +39,11 @@ if (availableRenderers === undefined || availableRenderers === null) {
 
 const extractSvg = (str: string) => str.match(/<svg.*<\/svg>/s)?.[0];
 
-type Stdin = {
+type Stdin = Array<{
 	renderer: string,
 	format: "svg" | "png",
 	code: string,
-}[];
+}>;
 
 const render = async (codes: string[], renderer: string, format: Stdin[0]["format"]): Promise<{result?: string, error?: string}[]> => {
 	assert(codes.length !== 0, "codes.length is zero");
@@ -109,21 +111,21 @@ const render = async (codes: string[], renderer: string, format: Stdin[0]["forma
 
 const parseStdin = (stdin: string): Stdin => {
 	const parsed = JSON.parse(stdin);
+	console.error(parsed);
 	assert(Array.isArray(parsed), `Stdin must be Array, got: ${parsed}`);
 	parsed.forEach((r) => {
 		assert.equal(typeof r, "object");
 		assert.equal(typeof r["renderer"], "string");
 		assert.equal(typeof r["code"], "string");
 		assert.equal(typeof r["format"], "string");
-		assert(["png", "svg"].includes(r["format"]), `format not png or svg. Format: ${r["format"]}`);
-		if (r["renderer"].match(depPatterns.recharts)) {
-			assert.equal(r["format"], "svg");
-		}
-		if (r["renderer"].match(depPatterns.swirly)) {
-			assert.equal(r["format"], "svg");
-		}
-		const availableRendererStrings = Object.entries(availableRenderers).flatMap(([engine, configs]) => configs.flatMap(({version}) => `${engine}-${version}`));
-		assert(availableRendererStrings.includes(r["renderer"]), `renderer not available. Renderer: ${r["renderer"]}, available renderers: ${availableRenderers}`);
+		const availableRendererStrings = Object.entries(availableRenderers).flatMap(([, configs]) => configs.flatMap(({renderer}) => renderer));
+		console.error(r);
+		assert(availableRendererStrings.includes(r["renderer"]), `renderer not available. Renderer: ${r["renderer"]}, available renderers: ${availableRendererStrings}`);
+		const foundEngine = Object.entries(availableRenderers).find(([, configs]) => configs.find(({renderer}) => renderer === r["renderer"]));
+		assert(foundEngine);
+		const foundRenderer = foundEngine[1].find(({renderer}) => renderer === r["renderer"]);
+		assert(foundRenderer);
+		assert(foundRenderer?.formats.includes(r["format"]));
 	});
 
 	return parsed;

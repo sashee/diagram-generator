@@ -116,13 +116,13 @@ const render = async (code, renderer, format) => {
 }
 
 const versions = JSON.parse(await fs.readFile("${./supported-versions.json}", "utf8"));
-await Promise.all(versions.plantuml.map(async (v) => {
+await Promise.all(versions.plantuml.map(async ({version}) => {
 	const code = "@startuml\na -> b\n@enduml";
-	await render(code, "plantuml-" + v, "png").then((r) => fs.writeFile(path.join(process.env.out, "plantuml-" + v + ".png"), Buffer.from(r, "base64")));
-	await render(code, "plantuml-" + v, "svg").then((r) => fs.writeFile(path.join(process.env.out, "plantuml-" + v + ".svg"), r));
+	await render(code, "plantuml-" + version, "png").then((r) => fs.writeFile(path.join(process.env.out, "plantuml-" + version + ".png"), Buffer.from(r, "base64")));
+	await render(code, "plantuml-" + version, "svg").then((r) => fs.writeFile(path.join(process.env.out, "plantuml-" + version + ".svg"), r));
 }));
 
-await Promise.all(versions.recharts.map(async (v) => {
+await Promise.all(versions.recharts.map(async ({version}) => {
 	const code = `
 const data = [0, 1, 2, 3].map((r) => ({ia: 1.25 + r * 1}));
 
@@ -137,10 +137,10 @@ const data = [0, 1, 2, 3].map((r) => ({ia: 1.25 + r * 1}));
 	<ReferenceLine y={2.3} label={<Label value="S3 Standard" position="insideBottomRight"/>} stroke="orange" strokeDasharray="3 3" strokeWidth={2}/>
 </LineChart>
 	`;
-	await render(code, "recharts-" + v, "svg").then((r) => fs.writeFile(path.join(process.env.out, "recharts-" + v + ".svg"), r));
+	await render(code, "recharts-" + version, "svg").then((r) => fs.writeFile(path.join(process.env.out, "recharts-" + version + ".svg"), r));
 }));
 
-await Promise.all(versions.swirly.map(async (v) => {
+await Promise.all(versions.swirly.map(async ({version}) => {
 	const code = `
 -1-2-3-4-5|
 
@@ -153,7 +153,7 @@ C := P3
 D := P4
 E := P5
 	`;
-	await render(code, "swirly-" + v, "svg").then((r) => fs.writeFile(path.join(process.env.out, "swirly-" + v + ".svg"), r));
+	await render(code, "swirly-" + version, "svg").then((r) => fs.writeFile(path.join(process.env.out, "swirly-" + version + ".svg"), r));
 }));
 
 ''}/bin/script
@@ -163,6 +163,7 @@ in
 	pkgs.symlinkJoin {
 		name = "test";
 		paths = [
+			(diagram_generator)
 			(svgtest ./tests/test.txt)
 			(pngandsvgtest ./tests/test2.txt)
 			(pngandsvgtest ./tests/test3.txt)
