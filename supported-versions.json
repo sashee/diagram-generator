@@ -1,7 +1,8 @@
 {
 	"plantuml": [
 		{"version": "v1.2025.3", "formats": ["svg", "png"]},
-		{"version": "v1.2025.4", "formats": ["svg", "png"]}
+		{"version": "v1.2025.4", "formats": ["svg", "png"]},
+		{"version": "v1.2025.7", "formats": ["svg", "png"]}
 	],
 	"recharts": [
 		{"version": "2.15.4", "formats": ["svg"]}
