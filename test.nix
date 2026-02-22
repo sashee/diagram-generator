@@ -3,26 +3,47 @@ let
   pkgs = import nixpkgs { config = {}; overlays = []; };
   fontconfig = import ./tests/default-fontconfig.nix { inherit pkgs; };
   packages = import ./default.nix { inherit pkgs fontconfig; };
+
   testFiles = builtins.sort (a: b: a < b) (builtins.filter
     (name: pkgs.lib.hasSuffix ".test.mjs" name)
     (builtins.attrNames (builtins.readDir ./tests))
   );
-  runAllTests = builtins.concatStringsSep "\n" (map (file: ''
-    test_name="${pkgs.lib.removeSuffix ".test.mjs" file}"
-    test_file="${./tests}/${file}"
-    test_out_dir="$out/$test_name"
-    mkdir -p "$test_out_dir"
-    TEST_OUT_DIR="$test_out_dir" DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "$test_file"
-  '') testFiles);
-in
-  pkgs.runCommand "diagram-generator-tests" {
-    nativeBuildInputs = [
-      pkgs.nodejs_latest
-    ];
+
+  _ = if builtins.length testFiles == 0
+    then throw "no tests found in ./tests (*.test.mjs)"
+    else null;
+
+  mkTestDerivation = file:
+    let
+      testName = pkgs.lib.removeSuffix ".test.mjs" file;
+      testsDir = ./tests;
+    in
+    pkgs.runCommand "diagram-generator-test-${testName}" {
+      nativeBuildInputs = [ pkgs.nodejs_latest ];
+    } ''
+      set -euo pipefail
+      mkdir -p "$out"
+      TEST_OUT_DIR="$out" DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "${testsDir}/${file}"
+    '';
+
+  testNames = map (file: pkgs.lib.removeSuffix ".test.mjs" file) testFiles;
+  testDerivationsByName = builtins.listToAttrs (map (file: {
+    name = pkgs.lib.removeSuffix ".test.mjs" file;
+    value = mkTestDerivation file;
+  }) testFiles);
+
+  allTests = pkgs.linkFarm "diagram-generator-tests" (map (testName: {
+    name = testName;
+    path = testDerivationsByName.${testName};
+  }) testNames);
+
+  shell = pkgs.mkShell {
+    nativeBuildInputs = [ pkgs.nodejs_latest ];
     shellHook = ''
       export DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator"
       export SUPPORTED_VERSIONS_JSON="${./supported-versions.json}"
       export DG_TEST_TMP="$(mktemp -d "''${TMPDIR:-/tmp}/diagram-generator-tests.XXXXXX")"
+
       run-test() {
         if [ "$#" -ne 1 ]; then
           echo "usage: run-test <path/to/test.test.mjs>"
@@ -57,14 +78,6 @@ in
       echo "DG_TEST_TMP=$DG_TEST_TMP"
       echo "use: run-test tests/<name>.test.mjs"
     '';
-  } ''
-    set -euo pipefail
-
-    if [ ${toString (builtins.length testFiles)} -eq 0 ]; then
-      echo "no tests found in ./tests (*.test.mjs)" >&2
-      exit 1
-    fi
-
-    mkdir -p "$out"
-    ${runAllTests}
-  ''
+  };
+in
+if pkgs.lib.inNixShell then shell else allTests

@@ -21,7 +21,7 @@ fn main() {
         process::exit(1);
     });
 
-    let output_svg = svg_font_extractor::embed_svg_fonts(&input_svg).unwrap_or_else(|e| {
+    let output_svg = svg_font_inliner::embed_svg_fonts(&input_svg).unwrap_or_else(|e| {
         eprintln!("{e}");
         process::exit(1);
     });

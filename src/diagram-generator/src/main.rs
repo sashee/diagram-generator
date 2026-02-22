@@ -185,7 +185,7 @@ fn run_command(bin: &str, args: &[&str], cwd: Option<&Path>) -> Result<(), Strin
 }
 
 fn embed_svg_fonts(svg: &str) -> Result<String, String> {
-    svg_font_extractor::embed_svg_fonts(svg)
+    svg_font_inliner::embed_svg_fonts(svg)
 }
 
 fn find_renderer<'a>(

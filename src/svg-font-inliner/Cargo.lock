@@ -342,7 +342,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "svg-font-extractor"
+name = "svg-font-inliner"
 version = "0.1.0"
 dependencies = [
  "base64",
