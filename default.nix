@@ -6,6 +6,7 @@
 	pkgs,
 }:
 let
+	svg_font_inliner = import ./svg-font-inliner.nix { inherit pkgs; };
 	diagram_generator_rs = pkgs.rustPlatform.buildRustPackage {
 		pname = "diagram-generator-rs";
 		version = "0.1.0";
@@ -105,4 +106,5 @@ esac
 	'';
 in {
 	inherit bin;
+	inherit svg_font_inliner;
 }

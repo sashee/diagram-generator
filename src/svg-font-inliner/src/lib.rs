@@ -6,35 +6,25 @@ use std::sync::{Arc, Mutex};
 use base64::Engine;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct FontRequest {
-    families: Vec<String>,
-    style: String,
-    weight: u16,
-    stretch: String,
-    variations: String,
+pub struct FontQuery {
+    pub families: Vec<String>,
+    pub style: String,
+    pub weight: u16,
+    pub stretch: String,
+    pub variations: String,
+    pub missing_char: Option<char>,
 }
 
 #[derive(Clone, Debug)]
 struct EmbeddedFont {
-    path: PathBuf,
     mime: &'static str,
     format_hint: &'static str,
     base64_data: String,
 }
 
 #[derive(Clone, Debug)]
-struct ResolveAttempt {
-    family: String,
-    pattern: String,
-    result_path: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug)]
 struct ResolveDebug {
-    request: FontRequest,
-    attempts: Vec<ResolveAttempt>,
-    selected_family: String,
-    selected_pattern: String,
+    request: FontQuery,
     selected_path: PathBuf,
 }
 
@@ -83,13 +73,33 @@ fn xml_escape_attr(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-fn build_fc_match_pattern(request: &FontRequest, family: &str) -> String {
-    let mut pattern = format!("{family}:weight={}", request.weight);
-    match request.style.as_str() {
+fn font_spec_to_query(font: &usvg::Font, missing_char: Option<char>) -> FontQuery {
+    FontQuery {
+        families: font
+            .families()
+            .iter()
+            .map(font_family_to_string)
+            .collect::<Vec<_>>(),
+        style: format!("{:?}", font.style()),
+        weight: font.weight(),
+        stretch: format!("{:?}", font.stretch()),
+        variations: format!("{:?}", font.variations()),
+        missing_char,
+    }
+}
+
+fn build_fc_match_pattern(query: &FontQuery, family: &str) -> String {
+    let mut pattern = format!("{family}:weight={}", query.weight);
+    match query.style.as_str() {
         "Italic" => pattern.push_str(":slant=italic"),
         "Oblique" => pattern.push_str(":slant=oblique"),
         _ => {}
     }
+
+    if let Some(c) = query.missing_char {
+        pattern.push_str(&format!(":charset={:X}", c as u32));
+    }
+
     pattern
 }
 
@@ -106,16 +116,72 @@ fn resolve_with_fc_match_pattern(pattern: &str) -> Option<PathBuf> {
     Some(PathBuf::from(first_line))
 }
 
-fn resolve_font_path(request: &FontRequest, family: &str) -> Option<PathBuf> {
-    let pattern = build_fc_match_pattern(request, family);
-    resolve_with_fc_match_pattern(&pattern)
+pub fn resolve_font_with_fc_match(query: &FontQuery) -> Result<PathBuf, String> {
+    for family in &query.families {
+        let pattern = build_fc_match_pattern(query, family);
+        if let Some(path) = resolve_with_fc_match_pattern(&pattern) {
+            return Ok(path);
+        }
+    }
+
+    Err(format!(
+        "failed to resolve font file for request: {:?}",
+        query
+    ))
+}
+
+fn fallback_query_from_used_fonts(
+    missing_char: char,
+    used_fonts: &[usvg::fontdb::ID],
+    db: &Arc<usvg::fontdb::Database>,
+) -> Result<FontQuery, String> {
+    let base_font_id = used_fonts
+        .first()
+        .copied()
+        .ok_or_else(|| "usvg did not provide a base font for fallback selection".to_string())?;
+    let base_face = db
+        .face(base_font_id)
+        .ok_or_else(|| format!("base face not found in font database: {base_font_id:?}"))?;
+
+    let mut families = base_face
+        .families
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    families.dedup();
+    if families.is_empty() {
+        families.push("sans-serif".to_string());
+    }
+
+    Ok(FontQuery {
+        families,
+        style: format!("{:?}", base_face.style),
+        weight: base_face.weight.0,
+        stretch: format!("{:?}", base_face.stretch),
+        variations: "[]".to_string(),
+        missing_char: Some(missing_char),
+    })
+}
+
+fn find_face_id_for_path(db: &usvg::fontdb::Database, path: &Path) -> Option<usvg::fontdb::ID> {
+    for face in db.faces() {
+        match &face.source {
+            usvg::fontdb::Source::File(face_path) if face_path == path => return Some(face.id),
+            usvg::fontdb::Source::SharedFile(face_path, _) if face_path == path => {
+                return Some(face.id);
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn ensure_font_loaded(
     db: &mut Arc<usvg::fontdb::Database>,
     loaded_paths: &Arc<Mutex<BTreeSet<PathBuf>>>,
     path: &Path,
-) -> Result<(), String> {
+) -> Result<usvg::fontdb::ID, String> {
     let should_load = {
         let mut loaded = loaded_paths
             .lock()
@@ -131,7 +197,13 @@ fn ensure_font_loaded(
             )
         })?;
     }
-    Ok(())
+
+    find_face_id_for_path(db, path).ok_or_else(|| {
+        format!(
+            "loaded font '{}' but could not find face id in font database",
+            path.display()
+        )
+    })
 }
 
 fn detect_font_type(path: &Path) -> (&'static str, &'static str) {
@@ -151,7 +223,7 @@ fn detect_font_type(path: &Path) -> (&'static str, &'static str) {
 }
 
 fn build_css(
-    request_to_font: &[(FontRequest, PathBuf)],
+    request_to_font: &[(FontQuery, PathBuf)],
     embedded: &BTreeMap<PathBuf, EmbeddedFont>,
 ) -> String {
     let mut css = String::new();
@@ -209,17 +281,6 @@ fn find_root_svg_open_tag_end(svg: &str) -> Option<usize> {
 fn build_debug_comments(debug_entries: &[ResolveDebug]) -> Result<String, String> {
     let mut out = String::new();
     for debug in debug_entries {
-        let attempts = debug
-            .attempts
-            .iter()
-            .map(|a| {
-                serde_json::json!({
-                    "family": a.family,
-                    "fc_match_pattern": a.pattern,
-                    "result_path": a.result_path.as_ref().map(|p| p.display().to_string()),
-                })
-            })
-            .collect::<Vec<_>>();
         let json = serde_json::json!({
             "request": {
                 "families": debug.request.families,
@@ -227,11 +288,9 @@ fn build_debug_comments(debug_entries: &[ResolveDebug]) -> Result<String, String
                 "weight": debug.request.weight,
                 "stretch": debug.request.stretch,
                 "variations": debug.request.variations,
+                "missing_char": debug.request.missing_char,
             },
-            "attempts": attempts,
             "selected": {
-                "family": debug.selected_family,
-                "fc_match_pattern": debug.selected_pattern,
                 "result_path": debug.selected_path.display().to_string(),
             }
         });
@@ -256,64 +315,112 @@ fn inject_style_block(svg: &str, debug_comments: &str, css: &str) -> Result<Stri
     Ok(out)
 }
 
-pub fn embed_svg_fonts(input_svg: &str) -> Result<String, String> {
+pub fn embed_svg_fonts<F>(input_svg: &str, resolver: F) -> Result<String, String>
+where
+    F: Fn(&FontQuery) -> Result<PathBuf, String> + Send + Sync + 'static,
+{
     if contains_font_face_rule(input_svg) {
         return Err("refusing to process SVG: SVG already contains @font-face rules".to_string());
     }
 
-    let requests: Arc<Mutex<Vec<FontRequest>>> = Arc::new(Mutex::new(Vec::new()));
-    let requests_for_resolver = Arc::clone(&requests);
+    let resolver = Arc::new(resolver);
+    let queries: Arc<Mutex<Vec<FontQuery>>> = Arc::new(Mutex::new(Vec::new()));
+    let queries_for_select_font = Arc::clone(&queries);
+    let queries_for_select_fallback = Arc::clone(&queries);
+    let resolver_for_select_font = Arc::clone(&resolver);
+    let resolver_for_select_fallback = Arc::clone(&resolver);
+    let resolved_paths: Arc<Mutex<BTreeMap<FontQuery, PathBuf>>> =
+        Arc::new(Mutex::new(BTreeMap::new()));
+    let resolved_paths_for_select_font = Arc::clone(&resolved_paths);
+    let resolved_paths_for_select_fallback = Arc::clone(&resolved_paths);
     let loaded_paths: Arc<Mutex<BTreeSet<PathBuf>>> = Arc::new(Mutex::new(BTreeSet::new()));
-    let loaded_paths_for_resolver = Arc::clone(&loaded_paths);
+    let loaded_paths_for_select_font = Arc::clone(&loaded_paths);
+    let loaded_paths_for_select_fallback = Arc::clone(&loaded_paths);
     let resolver_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let resolver_error_for_resolver = Arc::clone(&resolver_error);
+    let resolver_error_for_select_font = Arc::clone(&resolver_error);
+    let resolver_error_for_select_fallback = Arc::clone(&resolver_error);
 
     let mut options = usvg::Options::default();
-    let default_select_font = usvg::FontResolver::default_font_selector();
-    let default_select_fallback = usvg::FontResolver::default_fallback_selector();
     options.font_resolver = usvg::FontResolver {
         select_font: Box::new(move |font, db| {
-            let request = FontRequest {
-                families: font
-                    .families()
-                    .iter()
-                    .map(font_family_to_string)
-                    .collect::<Vec<_>>(),
-                style: format!("{:?}", font.style()),
-                weight: font.weight(),
-                stretch: format!("{:?}", font.stretch()),
-                variations: format!("{:?}", font.variations()),
-            };
+            let query = font_spec_to_query(font, None);
 
-            if let Ok(mut guard) = requests_for_resolver.lock() {
-                guard.push(request);
+            if let Ok(mut guard) = queries_for_select_font.lock() {
+                guard.push(query.clone());
             }
 
-            for family in font.families().iter().map(font_family_to_string) {
-                let req = FontRequest {
-                    families: vec![family.clone()],
-                    style: format!("{:?}", font.style()),
-                    weight: font.weight(),
-                    stretch: format!("{:?}", font.stretch()),
-                    variations: format!("{:?}", font.variations()),
-                };
+            match resolver_for_select_font(&query) {
+                Ok(path) => {
+                    if let Ok(mut map) = resolved_paths_for_select_font.lock() {
+                        map.insert(query.clone(), path.clone());
+                    }
 
-                if let Some(path) = resolve_font_path(&req, &family) {
-                    if let Err(err) = ensure_font_loaded(db, &loaded_paths_for_resolver, &path) {
-                        if let Ok(mut slot) = resolver_error_for_resolver.lock() {
-                            if slot.is_none() {
-                                *slot = Some(err);
+                    match ensure_font_loaded(db, &loaded_paths_for_select_font, &path) {
+                        Ok(id) => return Some(id),
+                        Err(err) => {
+                            if let Ok(mut slot) = resolver_error_for_select_font.lock() {
+                                if slot.is_none() {
+                                    *slot = Some(err);
+                                }
                             }
                         }
                     }
-                    break;
+                }
+                Err(err) => {
+                    if let Ok(mut slot) = resolver_error_for_select_font.lock() {
+                        if slot.is_none() {
+                            *slot = Some(err);
+                        }
+                    }
                 }
             }
 
-            default_select_font(font, db)
+            None
         }),
-        select_fallback: Box::new(move |ch, used_fonts, db| {
-            default_select_fallback(ch, used_fonts, db)
+        select_fallback: Box::new(move |missing_char, used_fonts, db| {
+            let query = match fallback_query_from_used_fonts(missing_char, used_fonts, db) {
+                Ok(query) => query,
+                Err(err) => {
+                    if let Ok(mut slot) = resolver_error_for_select_fallback.lock() {
+                        if slot.is_none() {
+                            *slot = Some(err);
+                        }
+                    }
+                    return None;
+                }
+            };
+
+            if let Ok(mut guard) = queries_for_select_fallback.lock() {
+                guard.push(query.clone());
+            }
+
+            match resolver_for_select_fallback(&query) {
+                Ok(path) => {
+                    if let Ok(mut map) = resolved_paths_for_select_fallback.lock() {
+                        map.insert(query.clone(), path.clone());
+                    }
+
+                    match ensure_font_loaded(db, &loaded_paths_for_select_fallback, &path) {
+                        Ok(id) => Some(id),
+                        Err(err) => {
+                            if let Ok(mut slot) = resolver_error_for_select_fallback.lock() {
+                                if slot.is_none() {
+                                    *slot = Some(err);
+                                }
+                            }
+                            None
+                        }
+                    }
+                }
+                Err(err) => {
+                    if let Ok(mut slot) = resolver_error_for_select_fallback.lock() {
+                        if slot.is_none() {
+                            *slot = Some(err);
+                        }
+                    }
+                    None
+                }
+            }
         }),
     };
 
@@ -326,10 +433,10 @@ pub fn embed_svg_fonts(input_svg: &str) -> Result<String, String> {
         }
     }
 
-    let mut deduped_requests = {
-        let guard = requests
+    let mut deduped_queries = {
+        let guard = queries
             .lock()
-            .map_err(|_| "failed to collect font requests".to_string())?;
+            .map_err(|_| "failed to collect font queries".to_string())?;
         guard
             .iter()
             .cloned()
@@ -337,48 +444,33 @@ pub fn embed_svg_fonts(input_svg: &str) -> Result<String, String> {
             .into_iter()
             .collect::<Vec<_>>()
     };
-    deduped_requests.sort();
+    deduped_queries.sort();
 
-    let mut request_to_font = Vec::<(FontRequest, PathBuf)>::new();
+    let resolved_paths_snapshot = resolved_paths
+        .lock()
+        .map_err(|_| "failed to collect resolved font paths".to_string())?
+        .clone();
+
+    let mut request_to_font = Vec::<(FontQuery, PathBuf)>::new();
     let mut resolve_debug = Vec::<ResolveDebug>::new();
     let mut needed_paths = BTreeSet::<PathBuf>::new();
-    for request in &deduped_requests {
-        let mut chosen: Option<PathBuf> = None;
-        let mut selected_family = String::new();
-        let mut selected_pattern = String::new();
-        let mut attempts = Vec::<ResolveAttempt>::new();
-        for family in &request.families {
-            let pattern = build_fc_match_pattern(request, family);
-            let maybe_path = resolve_with_fc_match_pattern(&pattern);
-            attempts.push(ResolveAttempt {
-                family: family.clone(),
-                pattern: pattern.clone(),
-                result_path: maybe_path.clone(),
-            });
-            if let Some(path) = maybe_path {
-                chosen = Some(path);
-                selected_family = family.clone();
-                selected_pattern = pattern;
-                break;
-            }
-        }
-
-        let chosen = chosen
-            .ok_or_else(|| format!("failed to resolve font file for request: {request:?}"))?;
+    for query in &deduped_queries {
+        let chosen = resolved_paths_snapshot
+            .get(query)
+            .cloned()
+            .or_else(|| resolver(query).ok())
+            .ok_or_else(|| format!("failed to resolve font file for request: {query:?}"))?;
         if !chosen.exists() {
             return Err(format!(
-                "font resolver returned non-existent file for request {request:?}: {}",
+                "font resolver returned non-existent file for request {query:?}: {}",
                 chosen.display()
             ));
         }
 
         needed_paths.insert(chosen.clone());
-        request_to_font.push((request.clone(), chosen));
+        request_to_font.push((query.clone(), chosen));
         resolve_debug.push(ResolveDebug {
-            request: request.clone(),
-            attempts,
-            selected_family,
-            selected_pattern,
+            request: query.clone(),
             selected_path: request_to_font
                 .last()
                 .map(|(_, p)| p.clone())
@@ -395,7 +487,6 @@ pub fn embed_svg_fonts(input_svg: &str) -> Result<String, String> {
         embedded.insert(
             path.clone(),
             EmbeddedFont {
-                path,
                 mime,
                 format_hint,
                 base64_data,

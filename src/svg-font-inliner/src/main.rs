@@ -21,10 +21,12 @@ fn main() {
         process::exit(1);
     });
 
-    let output_svg = svg_font_inliner::embed_svg_fonts(&input_svg).unwrap_or_else(|e| {
-        eprintln!("{e}");
-        process::exit(1);
-    });
+    let output_svg =
+        svg_font_inliner::embed_svg_fonts(&input_svg, svg_font_inliner::resolve_font_with_fc_match)
+            .unwrap_or_else(|e| {
+                eprintln!("{e}");
+                process::exit(1);
+            });
 
     fs::write(output_svg_path, output_svg).unwrap_or_else(|e| {
         eprintln!("failed to write output SVG '{output_svg_path}': {e}");

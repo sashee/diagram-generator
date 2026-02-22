@@ -32,10 +32,18 @@ let
     value = mkTestDerivation file;
   }) testFiles);
 
-  allTests = pkgs.linkFarm "diagram-generator-tests" (map (testName: {
-    name = testName;
-    path = testDerivationsByName.${testName};
-  }) testNames);
+  allTests = pkgs.linkFarm "diagram-generator-tests" (
+    (map (testName: {
+      name = testName;
+      path = testDerivationsByName.${testName};
+    }) testNames)
+    ++ [
+      {
+        name = "svg-font-inliner";
+        path = packages.svg_font_inliner;
+      }
+    ]
+  );
 
   shell = pkgs.mkShell {
     nativeBuildInputs = [ pkgs.nodejs_latest ];
