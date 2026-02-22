@@ -69,6 +69,14 @@ export const assertFailure = (res) => {
 
 export const parseJson = (str) => JSON.parse(str);
 
+export const assertInlinedFonts = (svg, label = "svg") => {
+  assert.equal(typeof svg, "string", `${label}: expected svg string`);
+  assert(svg.includes("<svg"), `${label}: expected <svg`);
+  assert(svg.includes("</svg>"), `${label}: expected </svg>`);
+  assert(svg.includes("@font-face"), `${label}: expected @font-face rule`);
+  assert(/url\(data:[^)]+;base64,[^)]+\)/.test(svg), `${label}: expected base64 data URL in @font-face`);
+};
+
 export const listRenderers = async () => {
   const res = await runCli({ args: ["--list-available-renderers"] });
   assertSuccess(res);

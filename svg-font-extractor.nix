@@ -5,9 +5,9 @@ pkgs.rustPlatform.buildRustPackage {
 
   nativeBuildInputs = [pkgs.makeWrapper];
 
-  src = ./svg-font-extractor;
+  src = ./src/svg-font-extractor;
   cargoLock = {
-    lockFile = ./svg-font-extractor/Cargo.lock;
+    lockFile = ./src/svg-font-extractor/Cargo.lock;
   };
 
   postFixup = ''

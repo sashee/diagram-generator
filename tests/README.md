@@ -14,6 +14,7 @@ Current grouped tests:
 - `tests/contract-renderer-list.test.mjs`
 - `tests/contract-batch-behavior.test.mjs`
 - `tests/contract-render-matrix.test.mjs`
+- `tests/contract-font-inline.test.mjs`
 
 ## Running Tests
 

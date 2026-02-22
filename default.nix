@@ -6,7 +6,17 @@
 	pkgs,
 }:
 let
-	svg_font_extractor = import ./svg-font-extractor.nix {};
+	diagram_generator_rs = pkgs.rustPlatform.buildRustPackage {
+		pname = "diagram-generator-rs";
+		version = "0.1.0";
+
+		src = ./src;
+		cargoRoot = "diagram-generator";
+		buildAndTestSubdir = "diagram-generator";
+		cargoLock = {
+			lockFile = ./src/diagram-generator/Cargo.lock;
+		};
+	};
 
 	available_renderers = {
 		"plantuml" = (map
@@ -51,8 +61,8 @@ export AVAILABLE_RENDERERS=$(cat <<'EOF'
 ${builtins.toJSON validated_available_renderers}
 EOF
 )
-export SVG_FONT_EXTRACTOR_BIN=${svg_font_extractor}/bin/svg-font-extractor
 export FONTCONFIG_FILE=${fontconfig}
+export PATH=${pkgs.lib.makeBinPath [pkgs.fontconfig]}:$PATH
 
 case $1 in
     --list-available-renderers)
@@ -82,12 +92,12 @@ EOF
 ${pkgs.landrun}/bin/landrun \
 	--unrestricted-filesystem \
 	--env AVAILABLE_RENDERERS \
-	--env SVG_FONT_EXTRACTOR_BIN \
 	--env FONTCONFIG_FILE \
+	--env PATH \
 	--env TMP \
 	--env TEMP \
 	--env TMPDIR \
-${pkgs.nodejs_latest}/bin/node ${./src/index.ts} "$@"
+${diagram_generator_rs}/bin/diagram-generator-rs "$@"
 
 ;;
 esac

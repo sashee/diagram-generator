@@ -1,8 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
@@ -39,10 +36,6 @@ struct ResolveDebug {
     selected_family: String,
     selected_pattern: String,
     selected_path: PathBuf,
-}
-
-fn usage(binary_name: &str) {
-    eprintln!("Usage: {binary_name} <input-svg> <output-svg>");
 }
 
 fn contains_font_face_rule(svg: &str) -> bool {
@@ -122,24 +115,23 @@ fn ensure_font_loaded(
     db: &mut Arc<usvg::fontdb::Database>,
     loaded_paths: &Arc<Mutex<BTreeSet<PathBuf>>>,
     path: &Path,
-) {
+) -> Result<(), String> {
     let should_load = {
-        let mut loaded = loaded_paths.lock().unwrap_or_else(|_| {
-            eprintln!("failed to access loaded font path set");
-            process::exit(1);
-        });
+        let mut loaded = loaded_paths
+            .lock()
+            .map_err(|_| "failed to access loaded font path set".to_string())?;
         loaded.insert(path.to_path_buf())
     };
 
     if should_load {
-        if let Err(err) = Arc::make_mut(db).load_font_file(path) {
-            eprintln!(
+        Arc::make_mut(db).load_font_file(path).map_err(|err| {
+            format!(
                 "failed to load font '{}' into usvg db: {err}",
                 path.display()
-            );
-            process::exit(1);
-        }
+            )
+        })?;
     }
+    Ok(())
 }
 
 fn detect_font_type(path: &Path) -> (&'static str, &'static str) {
@@ -214,7 +206,7 @@ fn find_root_svg_open_tag_end(svg: &str) -> Option<usize> {
     None
 }
 
-fn build_debug_comments(debug_entries: &[ResolveDebug]) -> String {
+fn build_debug_comments(debug_entries: &[ResolveDebug]) -> Result<String, String> {
     let mut out = String::new();
     for debug in debug_entries {
         let attempts = debug
@@ -243,16 +235,14 @@ fn build_debug_comments(debug_entries: &[ResolveDebug]) -> String {
                 "result_path": debug.selected_path.display().to_string(),
             }
         });
-        let mut serialized = serde_json::to_string(&json).unwrap_or_else(|e| {
-            eprintln!("failed to serialize debug comment: {e}");
-            process::exit(1);
-        });
+        let mut serialized = serde_json::to_string(&json)
+            .map_err(|e| format!("failed to serialize debug comment: {e}"))?;
         serialized = serialized.replace("--", "- -");
         out.push_str("<!-- font-embed: ");
         out.push_str(&serialized);
         out.push_str(" -->\n");
     }
-    out
+    Ok(out)
 }
 
 fn inject_style_block(svg: &str, debug_comments: &str, css: &str) -> Result<String, String> {
@@ -266,34 +256,17 @@ fn inject_style_block(svg: &str, debug_comments: &str, css: &str) -> Result<Stri
     Ok(out)
 }
 
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 3 {
-        usage(&args[0]);
-        process::exit(2);
-    }
-
-    let input_svg_path = &args[1];
-    let output_svg_path = &args[2];
-
-    let data = fs::read(input_svg_path).unwrap_or_else(|e| {
-        eprintln!("failed to read SVG file '{input_svg_path}': {e}");
-        process::exit(1);
-    });
-    let input_svg = std::str::from_utf8(&data).unwrap_or_else(|e| {
-        eprintln!("failed to decode SVG file '{input_svg_path}' as UTF-8: {e}");
-        process::exit(1);
-    });
-
+pub fn embed_svg_fonts(input_svg: &str) -> Result<String, String> {
     if contains_font_face_rule(input_svg) {
-        eprintln!("refusing to process '{input_svg_path}': SVG already contains @font-face rules");
-        process::exit(1);
+        return Err("refusing to process SVG: SVG already contains @font-face rules".to_string());
     }
 
     let requests: Arc<Mutex<Vec<FontRequest>>> = Arc::new(Mutex::new(Vec::new()));
     let requests_for_resolver = Arc::clone(&requests);
     let loaded_paths: Arc<Mutex<BTreeSet<PathBuf>>> = Arc::new(Mutex::new(BTreeSet::new()));
     let loaded_paths_for_resolver = Arc::clone(&loaded_paths);
+    let resolver_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let resolver_error_for_resolver = Arc::clone(&resolver_error);
 
     let mut options = usvg::Options::default();
     let default_select_font = usvg::FontResolver::default_font_selector();
@@ -312,16 +285,6 @@ fn main() {
                 variations: format!("{:?}", font.variations()),
             };
 
-            eprintln!(
-                "[font-resolver/select_font] families={:?} style={} weight={} stretch={} size=n/a variant_caps=n/a variations={} db_faces={}",
-                request.families,
-                request.style,
-                request.weight,
-                request.stretch,
-                request.variations,
-                db.len()
-            );
-
             if let Ok(mut guard) = requests_for_resolver.lock() {
                 guard.push(request);
             }
@@ -336,38 +299,37 @@ fn main() {
                 };
 
                 if let Some(path) = resolve_font_path(&req, &family) {
-                    ensure_font_loaded(db, &loaded_paths_for_resolver, &path);
+                    if let Err(err) = ensure_font_loaded(db, &loaded_paths_for_resolver, &path) {
+                        if let Ok(mut slot) = resolver_error_for_resolver.lock() {
+                            if slot.is_none() {
+                                *slot = Some(err);
+                            }
+                        }
+                    }
                     break;
                 }
             }
 
-            let selected = default_select_font(font, db);
-            eprintln!("[font-resolver/select_font_result] selected={selected:?}");
-            selected
+            default_select_font(font, db)
         }),
         select_fallback: Box::new(move |ch, used_fonts, db| {
-            eprintln!(
-                "[font-resolver/select_fallback] char={:?} used_fonts={} db_faces={}",
-                ch,
-                used_fonts.len(),
-                db.len()
-            );
-            let selected = default_select_fallback(ch, used_fonts, db);
-            eprintln!("[font-resolver/select_fallback_result] selected={selected:?}");
-            selected
+            default_select_fallback(ch, used_fonts, db)
         }),
     };
 
-    usvg::Tree::from_data(&data, &options).unwrap_or_else(|e| {
-        eprintln!("failed to parse SVG '{input_svg_path}': {e}");
-        process::exit(1);
-    });
+    usvg::Tree::from_data(input_svg.as_bytes(), &options)
+        .map_err(|e| format!("failed to parse SVG: {e}"))?;
+
+    if let Ok(slot) = resolver_error.lock() {
+        if let Some(err) = slot.as_ref() {
+            return Err(err.clone());
+        }
+    }
 
     let mut deduped_requests = {
-        let guard = requests.lock().unwrap_or_else(|_| {
-            eprintln!("failed to collect font requests");
-            process::exit(1);
-        });
+        let guard = requests
+            .lock()
+            .map_err(|_| "failed to collect font requests".to_string())?;
         guard
             .iter()
             .cloned()
@@ -401,24 +363,15 @@ fn main() {
             }
         }
 
-        let chosen = chosen.unwrap_or_else(|| {
-            eprintln!("failed to resolve font file for request: {:?}", request);
-            process::exit(1);
-        });
+        let chosen = chosen
+            .ok_or_else(|| format!("failed to resolve font file for request: {request:?}"))?;
         if !chosen.exists() {
-            eprintln!(
-                "font resolver returned non-existent file for request {:?}: {}",
-                request,
+            return Err(format!(
+                "font resolver returned non-existent file for request {request:?}: {}",
                 chosen.display()
-            );
-            process::exit(1);
+            ));
         }
 
-        eprintln!(
-            "[font-resolver/resolved] request={:?} path={}",
-            request,
-            chosen.display()
-        );
         needed_paths.insert(chosen.clone());
         request_to_font.push((request.clone(), chosen));
         resolve_debug.push(ResolveDebug {
@@ -429,19 +382,14 @@ fn main() {
             selected_path: request_to_font
                 .last()
                 .map(|(_, p)| p.clone())
-                .unwrap_or_else(|| {
-                    eprintln!("internal error: missing selected path");
-                    process::exit(1);
-                }),
+                .ok_or_else(|| "internal error: missing selected path".to_string())?,
         });
     }
 
     let mut embedded = BTreeMap::<PathBuf, EmbeddedFont>::new();
     for path in needed_paths {
-        let bytes = fs::read(&path).unwrap_or_else(|e| {
-            eprintln!("failed to read font file '{}': {e}", path.display());
-            process::exit(1);
-        });
+        let bytes = std::fs::read(&path)
+            .map_err(|e| format!("failed to read font file '{}': {e}", path.display()))?;
         let (mime, format_hint) = detect_font_type(&path);
         let base64_data = base64::engine::general_purpose::STANDARD.encode(bytes);
         embedded.insert(
@@ -457,26 +405,13 @@ fn main() {
 
     let css = build_css(&request_to_font, &embedded);
     if css.trim().is_empty() {
-        eprintln!("no font requests were found; refusing to emit unchanged SVG");
-        process::exit(1);
+        return Err("no font requests were found; refusing to emit unchanged SVG".to_string());
     }
 
-    let debug_comments = build_debug_comments(&resolve_debug);
+    let debug_comments = build_debug_comments(&resolve_debug)?;
+    let output_svg = inject_style_block(input_svg, &debug_comments, &css)?;
 
-    let output_svg = inject_style_block(input_svg, &debug_comments, &css).unwrap_or_else(|e| {
-        eprintln!("failed to inject embedded font style block: {e}");
-        process::exit(1);
-    });
-
-    fs::write(output_svg_path, output_svg).unwrap_or_else(|e| {
-        eprintln!("failed to write output SVG '{}': {e}", output_svg_path);
-        process::exit(1);
-    });
-
-    for item in embedded.values() {
-        eprintln!("[font-resolver/embedded] {}", item.path.display());
-    }
-    eprintln!("wrote SVG with embedded fonts to '{}'", output_svg_path);
+    Ok(output_svg)
 }
 
 #[cfg(test)]
