@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="120">
+  <text x="10" y="30" font-family="monospace" font-size="16">
+    latin + cjk + emoji fallback: hello 世界 🙂
+  </text>
+  <text x="10" y="70" font-family="sans-serif" font-size="16">
+    force fallback probe: z 𐍈 𑄃 🧪
+  </text>
+</svg>

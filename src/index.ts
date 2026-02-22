@@ -8,6 +8,9 @@ import { text } from "node:stream/consumers";
 import stream from "node:stream";
 import assert from "node:assert/strict";
 
+const execFile = util.promisify(child_process.execFile);
+const EXEC_MAX_BUFFER = 128 * 1024 * 1024;
+
 const depPatterns = {
 	plantuml: /^plantuml-(?<version>.*)$/,
 	recharts: /^recharts-(?<version>.*)$/,
@@ -39,6 +42,25 @@ if (availableRenderers === undefined || availableRenderers === null) {
 
 const extractSvg = (str: string) => str.match(/<svg.*<\/svg>/s)?.[0];
 
+const embedSvgFonts = async (svg: string, cwd: string, stem: string): Promise<string> => {
+	const svgFontExtractorBin = process.env["SVG_FONT_EXTRACTOR_BIN"];
+	assert(svgFontExtractorBin, "SVG_FONT_EXTRACTOR_BIN undefined");
+
+	const inputPath = path.join(cwd, `${stem}.svg`);
+	const outputPath = path.join(cwd, `${stem}.embedded.svg`);
+	await fs.writeFile(inputPath, svg, "utf8");
+
+	await execFile(svgFontExtractorBin, [inputPath, outputPath], {
+		cwd,
+		maxBuffer: EXEC_MAX_BUFFER,
+		env: {
+			...process.env,
+			FONTCONFIG_FILE: process.env["FONTCONFIG_FILE"],
+		},
+	});
+	return await fs.readFile(outputPath, "utf8");
+};
+
 type Stdin = Array<{
 	renderer: string,
 	format: "svg" | "png",
@@ -55,16 +77,19 @@ const render = async (codes: string[], renderer: string, format: Stdin[0]["forma
 
 				const usedRenderer = availableRenderers["plantuml"].find((r) => r.version === version)!;
 				if (format === "png") {
-					await util.promisify(child_process.execFile)(usedRenderer.bin, [".", "-tpng", "-o", "out", "-nometadata"], {cwd});
+					await execFile(usedRenderer.bin, [".", "-tpng", "-o", "out", "-nometadata"], {cwd, maxBuffer: EXEC_MAX_BUFFER});
 					return await Promise.all(codes.map(async (_code, i) => {
 						const contents = await fs.readFile(path.join(cwd, "out", `in_${i}.png`))
 						return {result: contents.toString("base64")};
 					}));
 				}else {
-					await util.promisify(child_process.execFile)(usedRenderer.bin, [".", "-tsvg", "-o", "out", "-nometadata"], {cwd});
+					await execFile(usedRenderer.bin, [".", "-tsvg", "-o", "out", "-nometadata"], {cwd, maxBuffer: EXEC_MAX_BUFFER});
 					return await Promise.all(codes.map(async (_code, i) => {
-						const contents = await fs.readFile(path.join(cwd, "out", `in_${i}.svg`), "utf8")
-						return {result: extractSvg(contents)};
+						const contents = await fs.readFile(path.join(cwd, "out", `in_${i}.svg`), "utf8");
+						const extractedSvg = extractSvg(contents);
+						assert(extractedSvg, "plantuml output did not contain an svg root");
+						const embedded = await embedSvgFonts(extractedSvg, cwd, `embedded_${i}`);
+						return {result: embedded};
 					}));
 				}
 			});
@@ -73,27 +98,33 @@ const render = async (codes: string[], renderer: string, format: Stdin[0]["forma
 			const usedRenderer = availableRenderers["recharts"].find((r) => r.version === version)!;
 
 			return await Promise.all(codes.map(async (code) => {
-				const prom = util.promisify(child_process.execFile)(usedRenderer.bin);
-				const stdinStream = new stream.Readable();
-				stdinStream.push(code);
-				stdinStream.push(null);
-				stdinStream.pipe(prom.child.stdin);
-				const res = await prom;
-				return {result: res.stdout.trim()};
+				return await withTempDir(async (cwd) => {
+					const prom = execFile(usedRenderer.bin, [], {maxBuffer: EXEC_MAX_BUFFER});
+					const stdinStream = new stream.Readable();
+					stdinStream.push(code);
+					stdinStream.push(null);
+					stdinStream.pipe(prom.child.stdin);
+					const res = await prom;
+					const embedded = await embedSvgFonts(res.stdout.trim(), cwd, "embedded");
+					return {result: embedded};
+				});
 			}));
 		}else if (renderer.match(depPatterns.swirly)) {
 			const {version} = renderer.match(depPatterns.swirly)!.groups!;
 			const usedRenderer = availableRenderers["swirly"].find((r) => r.version === version)!;
 
 			return await Promise.all(codes.map(async (code) => {
-				const prom = util.promisify(child_process.execFile)(usedRenderer.bin);
-				const stdinStream = new stream.Readable();
-				stdinStream.push(code);
-				stdinStream.push(null);
-				stdinStream.pipe(prom.child.stdin);
-				const res = await prom;
-				console.error(res.stderr)
-				return {result: res.stdout.trim()};
+				return await withTempDir(async (cwd) => {
+					const prom = execFile(usedRenderer.bin, [], {maxBuffer: EXEC_MAX_BUFFER});
+					const stdinStream = new stream.Readable();
+					stdinStream.push(code);
+					stdinStream.push(null);
+					stdinStream.pipe(prom.child.stdin);
+					const res = await prom;
+					console.error(res.stderr)
+					const embedded = await embedSvgFonts(res.stdout.trim(), cwd, "embedded");
+					return {result: embedded};
+				});
 			}));
 		}else {
 			throw new Error(`Not supported renderer: ${renderer}`);

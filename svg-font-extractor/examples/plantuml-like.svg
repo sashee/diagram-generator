@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="740" height="320">
+  <g id="group-cascade" style="font-family: 'DejaVu Sans', sans-serif; font-size: 16px; font-weight: 500;">
+    <text x="20" y="30">inherits group style</text>
+    <text x="20" y="60" style="font-weight: 800;">inherits family but overrides weight</text>
+    <text x="20" y="90" font-family="monospace" style="font-style: italic;">attribute family overrides group family</text>
+  </g>
+
+  <g id="group-inline" style="font-family: 'Noto Sans', sans-serif; font-size: 15px; font-weight: 400;">
+    <text x="20" y="130">inline body style</text>
+    <text x="20" y="160" style="font-family: 'Times New Roman', serif; font-style: oblique; font-weight: 600;">inline override for family/style/weight</text>
+    <text x="20" y="190" style="font-family: 'IBM Plex Mono', monospace;">inline style overrides class</text>
+  </g>
+
+  <text x="20" y="230" style="font-family: 'Fira Code', monospace; font-weight: 700; font-style: italic;">headline style with named + generic family</text>
+
+  <text x="20" y="260" font-family="'Courier New', monospace" font-size="13" font-weight="400">
+    text with tspans
+    <tspan dx="8" style="font-family: 'Georgia', serif; font-weight: 700;">tspan override one</tspan>
+    <tspan dx="8" font-family="'Inter', sans-serif" font-style="italic">tspan override two</tspan>
+  </text>
+
+  <g style="font: italic 600 18px 'JetBrains Mono', monospace;">
+    <text x="20" y="300">font shorthand on ancestor group</text>
+  </g>
+</svg>

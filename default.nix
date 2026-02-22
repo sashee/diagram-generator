@@ -6,6 +6,8 @@
 	pkgs,
 }:
 let
+	svg_font_extractor = import ./svg-font-extractor.nix {};
+
 	available_renderers = {
 		"plantuml" = (map
 			({version, formats}: {
@@ -49,6 +51,8 @@ export AVAILABLE_RENDERERS=$(cat <<'EOF'
 ${builtins.toJSON validated_available_renderers}
 EOF
 )
+export SVG_FONT_EXTRACTOR_BIN=${svg_font_extractor}/bin/svg-font-extractor
+export FONTCONFIG_FILE=${fontconfig}
 
 case $1 in
     --list-available-renderers)
@@ -78,6 +82,8 @@ EOF
 ${pkgs.landrun}/bin/landrun \
 	--unrestricted-filesystem \
 	--env AVAILABLE_RENDERERS \
+	--env SVG_FONT_EXTRACTOR_BIN \
+	--env FONTCONFIG_FILE \
 	--env TMP \
 	--env TEMP \
 	--env TMPDIR \
@@ -87,5 +93,6 @@ ${pkgs.nodejs_latest}/bin/node ${./src/index.ts} "$@"
 esac
 
 	'';
-in
-	bin
+in {
+	inherit bin;
+}

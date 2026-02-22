@@ -1,177 +1,70 @@
 let
   nixpkgs = fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.05";
   pkgs = import nixpkgs { config = {}; overlays = []; };
-
-	fontconfig = (import ./tests/default-fontconfig.nix {inherit pkgs;});
-
-	diagram_generator = (import ./default.nix {inherit pkgs fontconfig;});
-
-	pngandsvgtest = file: pkgs.runCommand (builtins.baseNameOf file) {} ''
-mkdir $out
-
-${pkgs.nodejs_latest}/bin/node ${file} | \
-	${pkgs.jq}/bin/jq '[.[] | .format = "png"]' | \
-	${diagram_generator}/bin/diagram-generator | \
-	${pkgs.jq}/bin/jq -r '.[0].result' | \
-	${pkgs.coreutils}/bin/base64 -d > \
-	$out/${builtins.baseNameOf file}.png
-
-${pkgs.nodejs_latest}/bin/node ${file} | \
-	${pkgs.jq}/bin/jq '[.[] | .format = "svg"]' | \
-	${diagram_generator}/bin/diagram-generator | \
-	${pkgs.jq}/bin/jq -r '.[0].result' > \
-	$out/${builtins.baseNameOf file}.svg
-	'';
-	svgtest = file: pkgs.runCommand (builtins.baseNameOf file) {} ''
-mkdir $out
-
-${pkgs.nodejs_latest}/bin/node ${file} | \
-	${pkgs.jq}/bin/jq '[.[] | .format = "svg"]' | \
-	${diagram_generator}/bin/diagram-generator | \
-	${pkgs.jq}/bin/jq -r '.[0].result' > \
-	$out/${builtins.baseNameOf file}.svg
-	'';
-
-	errortest = pkgs.runCommand "error.json" {} ''
-mkdir -p $out
-
-${pkgs.writeScriptBin "script" ''
-#!${pkgs.nodejs_latest}/bin/node
-import child_process from "node:child_process";
-import stream from "node:stream";
-import util from "node:util";
-import assert from "node:assert/strict";
-
-const prom = util.promisify(child_process.execFile)("${diagram_generator}/bin/diagram-generator");
-const stdinStream = new stream.Readable();
-stdinStream.push(JSON.stringify([
-	{renderer: "plantuml-v1.2025.3", format: "svg", code: `@startuml
-actor a
-acctor b
-	@enduml`},
-]));
-stdinStream.push(null);
-stdinStream.pipe(prom.child.stdin);
-const res = await prom;
-const result = JSON.parse(res.stdout)[0];
-assert(result.error, "result should have an error, ''${JSON.stringify(result, undefined, 4)}");
-console.log(result)
-''}/bin/script > $out/error.json
-	'';
-
-	multierrortest = pkgs.runCommand "multierror.json" {} ''
-mkdir -p $out
-
-${pkgs.writeScriptBin "script" ''
-#!${pkgs.nodejs_latest}/bin/node
-import child_process from "node:child_process";
-import stream from "node:stream";
-import util from "node:util";
-import assert from "node:assert/strict";
-
-const prom = util.promisify(child_process.execFile)("${diagram_generator}/bin/diagram-generator");
-const stdinStream = new stream.Readable();
-stdinStream.push(JSON.stringify([
-	{renderer: "plantuml-v1.2025.3", format: "svg", code: `@startuml
-actor a
-actor b
-	@enduml`},
-	{renderer: "plantuml-v1.2025.3", format: "svg", code: `@startuml
-actor a
-acctor b
-	@enduml`},
-]));
-stdinStream.push(null);
-stdinStream.pipe(prom.child.stdin);
-const res = await prom;
-const ressvg = JSON.parse(res.stdout);
-assert(ressvg[0].result, "result[0] should have a result");
-assert(ressvg[1].error, "result[1] should have an error");
-console.log(ressvg)
-''}/bin/script > $out/multierror.json
-	'';
-
-	allVersions = pkgs.runCommand "all_versions" {} ''
-mkdir -p $out
-
-${pkgs.writeScriptBin "script" ''
-#!${pkgs.nodejs_latest}/bin/node
-import child_process from "node:child_process";
-import stream from "node:stream";
-import util from "node:util";
-import assert from "node:assert/strict";
-import fs from "node:fs/promises";
-import path from "node:path";
-
-const render = async (code, renderer, format) => {
-	const prom = util.promisify(child_process.execFile)("${diagram_generator}/bin/diagram-generator");
-	const stdinStream = new stream.Readable();
-	stdinStream.push(JSON.stringify([{renderer, code, format}]));
-	stdinStream.push(null);
-	stdinStream.pipe(prom.child.stdin);
-	const res = await prom;
-	const ressvg = JSON.parse(res.stdout);
-	assert(ressvg[0].result, `result[0] should have a result, result: ''${JSON.stringify(ressvg, undefined, 4)}`);
-	return ressvg[0].result;
-}
-
-const versions = JSON.parse(await fs.readFile("${./supported-versions.json}", "utf8"));
-await Promise.all(versions.plantuml.map(async ({version}) => {
-	const code = "@startuml\na -> b\n@enduml";
-	await render(code, "plantuml-" + version, "png").then((r) => fs.writeFile(path.join(process.env.out, "plantuml-" + version + ".png"), Buffer.from(r, "base64")));
-	await render(code, "plantuml-" + version, "svg").then((r) => fs.writeFile(path.join(process.env.out, "plantuml-" + version + ".svg"), r));
-}));
-
-await Promise.all(versions.recharts.map(async ({version}) => {
-	const code = `
-const data = [0, 1, 2, 3].map((r) => ({ia: 1.25 + r * 1}));
-
-<LineChart data={data} width={400} height={300}
-	margin={{ top: 10, right: 10, left: 20, bottom: 20 }}>
-	<CartesianGrid strokeDasharray="3 3" />
-	<YAxis width={40}>
-		<Label angle={-90} position="insideLeft">$/month/GB</Label>
-	</YAxis>
-	<XAxis label="Retrievals/month" position="insideBottom" height={60}/>
-	<Line type="monotone" dataKey="ia" stroke="red"/>
-	<ReferenceLine y={2.3} label={<Label value="S3 Standard" position="insideBottomRight"/>} stroke="orange" strokeDasharray="3 3" strokeWidth={2}/>
-</LineChart>
-	`;
-	await render(code, "recharts-" + version, "svg").then((r) => fs.writeFile(path.join(process.env.out, "recharts-" + version + ".svg"), r));
-}));
-
-await Promise.all(versions.swirly.map(async ({version}) => {
-	const code = `
--1-2-3-4-5|
-
-> orderedMergeMap
-
---A--BC--D--E|
-A := P1
-B := P2
-C := P3
-D := P4
-E := P5
-	`;
-	await render(code, "swirly-" + version, "svg").then((r) => fs.writeFile(path.join(process.env.out, "swirly-" + version + ".svg"), r));
-}));
-
-''}/bin/script
-	'';
-
+  fontconfig = import ./tests/default-fontconfig.nix { inherit pkgs; };
+  packages = import ./default.nix { inherit pkgs fontconfig; };
+  testFiles = builtins.sort (a: b: a < b) (builtins.filter
+    (name: pkgs.lib.hasSuffix ".test.mjs" name)
+    (builtins.attrNames (builtins.readDir ./tests))
+  );
+  runAllTests = builtins.concatStringsSep "\n" (map (file: ''
+    test_name="${pkgs.lib.removeSuffix ".test.mjs" file}"
+    test_file="${./tests}/${file}"
+    test_out_dir="$out/$test_name"
+    mkdir -p "$test_out_dir"
+    TEST_OUT_DIR="$test_out_dir" DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "$test_file"
+  '') testFiles);
 in
-	pkgs.symlinkJoin {
-		name = "test";
-		paths = [
-			(diagram_generator)
-			(svgtest ./tests/test.txt)
-			(pngandsvgtest ./tests/test2.txt)
-			(pngandsvgtest ./tests/test3.txt)
-			(pngandsvgtest ./tests/test4.txt)
-			(pngandsvgtest ./tests/test5.txt)
-			(pngandsvgtest ./tests/test6.txt)
-			errortest
-			multierrortest
-			allVersions
-		];
-	}
+  pkgs.runCommand "diagram-generator-tests" {
+    nativeBuildInputs = [
+      pkgs.nodejs_latest
+    ];
+    shellHook = ''
+      export DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator"
+      export SUPPORTED_VERSIONS_JSON="${./supported-versions.json}"
+      export DG_TEST_TMP="$(mktemp -d "''${TMPDIR:-/tmp}/diagram-generator-tests.XXXXXX")"
+      run-test() {
+        if [ "$#" -ne 1 ]; then
+          echo "usage: run-test <path/to/test.test.mjs>"
+          return 2
+        fi
+
+        test_file="$1"
+        case "$test_file" in
+          /*) ;;
+          *) test_file="$PWD/$test_file" ;;
+        esac
+
+        if [ ! -f "$test_file" ]; then
+          echo "test file not found: $test_file"
+          return 1
+        fi
+
+        base_name="$(basename "$test_file")"
+        test_name="''${base_name%.test.mjs}"
+        test_out_dir="$DG_TEST_TMP/$test_name"
+        mkdir -p "$test_out_dir"
+
+        echo "running $test_file"
+        TEST_OUT_DIR="$test_out_dir" DIAGRAM_GENERATOR_BIN="$DIAGRAM_GENERATOR_BIN" SUPPORTED_VERSIONS_JSON="$SUPPORTED_VERSIONS_JSON" node "$test_file"
+        status="$?"
+        echo "output dir: $test_out_dir"
+        return "$status"
+      }
+
+      echo "DIAGRAM_GENERATOR_BIN=$DIAGRAM_GENERATOR_BIN"
+      echo "SUPPORTED_VERSIONS_JSON=$SUPPORTED_VERSIONS_JSON"
+      echo "DG_TEST_TMP=$DG_TEST_TMP"
+      echo "use: run-test tests/<name>.test.mjs"
+    '';
+  } ''
+    set -euo pipefail
+
+    if [ ${toString (builtins.length testFiles)} -eq 0 ]; then
+      echo "no tests found in ./tests (*.test.mjs)" >&2
+      exit 1
+    fi
+
+    mkdir -p "$out"
+    ${runAllTests}
+  ''
