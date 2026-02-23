@@ -19,7 +19,7 @@ let
       testsDir = ./tests;
     in
     pkgs.runCommand "diagram-generator-test-${testName}" {
-      nativeBuildInputs = [ pkgs.nodejs_latest ];
+      nativeBuildInputs = [ pkgs.nodejs_latest pkgs.python3Packages.fonttools pkgs.fontconfig ];
     } ''
       set -euo pipefail
       mkdir -p "$out"
@@ -46,10 +46,17 @@ let
   );
 
   shell = pkgs.mkShell {
-    nativeBuildInputs = [ pkgs.nodejs_latest ];
+    nativeBuildInputs = [
+      pkgs.nodejs_latest
+      pkgs.rustc
+      pkgs.cargo
+      pkgs.python3Packages.fonttools
+      pkgs.fontconfig
+    ];
     shellHook = ''
       export DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator"
       export SUPPORTED_VERSIONS_JSON="${./supported-versions.json}"
+      export PYFTSUBSET_BIN="${pkgs.python3Packages.fonttools}/bin/pyftsubset"
       export DG_TEST_TMP="$(mktemp -d "''${TMPDIR:-/tmp}/diagram-generator-tests.XXXXXX")"
 
       run-test() {
@@ -83,6 +90,7 @@ let
 
       echo "DIAGRAM_GENERATOR_BIN=$DIAGRAM_GENERATOR_BIN"
       echo "SUPPORTED_VERSIONS_JSON=$SUPPORTED_VERSIONS_JSON"
+      echo "PYFTSUBSET_BIN=$PYFTSUBSET_BIN"
       echo "DG_TEST_TMP=$DG_TEST_TMP"
       echo "use: run-test tests/<name>.test.mjs"
     '';

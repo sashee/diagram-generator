@@ -63,7 +63,8 @@ ${builtins.toJSON validated_available_renderers}
 EOF
 )
 export FONTCONFIG_FILE=${fontconfig}
-export PATH=${pkgs.lib.makeBinPath [pkgs.fontconfig]}:$PATH
+export PYFTSUBSET_BIN=${pkgs.python3Packages.fonttools}/bin/pyftsubset
+export PATH=${pkgs.lib.makeBinPath [pkgs.fontconfig pkgs.python3Packages.fonttools]}:$PATH
 
 case $1 in
     --list-available-renderers)
@@ -94,6 +95,7 @@ ${pkgs.landrun}/bin/landrun \
 	--unrestricted-filesystem \
 	--env AVAILABLE_RENDERERS \
 	--env FONTCONFIG_FILE \
+	--env PYFTSUBSET_BIN \
 	--env PATH \
 	--env TMP \
 	--env TEMP \
