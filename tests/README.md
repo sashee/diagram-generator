@@ -15,6 +15,8 @@ Current grouped tests:
 - `tests/contract-batch-behavior.test.mjs`
 - `tests/contract-render-matrix.test.mjs`
 - `tests/contract-font-inline.test.mjs`
+- `tests/contract-svg-to-png-cli.test.mjs`
+- `tests/contract-svg-font-inliner-cli.test.mjs`
 
 ## Running Tests
 
@@ -63,6 +65,8 @@ Useful notes:
 
 - `test.nix` exports these environment variables for tests:
   - `DIAGRAM_GENERATOR_BIN`
+  - `SVG_TO_PNG_BIN`
+  - `SVG_FONT_INLINER_BIN`
   - `SUPPORTED_VERSIONS_JSON`
   - `TEST_OUT_DIR` (set per test by runner)
 - In interactive mode, `run-test` also creates a per-shell temp base directory (`DG_TEST_TMP`) and per-test output subdirectories.

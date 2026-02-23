@@ -1,0 +1,13 @@
+[package]
+name = "svg-to-png"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+resvg = "0.47"
+roxmltree = "0.21"
+svg-font-inliner = { path = "../svg-font-inliner" }
+usvg = "0.47"
+
+[dev-dependencies]
+base64 = "0.22"

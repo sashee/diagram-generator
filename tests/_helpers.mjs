@@ -7,6 +7,9 @@ import process from "node:process";
 const diagramGeneratorBin = process.env.DIAGRAM_GENERATOR_BIN;
 assert(diagramGeneratorBin, "DIAGRAM_GENERATOR_BIN is required");
 
+export const svgToPngBin = process.env.SVG_TO_PNG_BIN;
+export const svgFontInlinerBin = process.env.SVG_FONT_INLINER_BIN;
+
 const testOutDir = process.env.TEST_OUT_DIR;
 assert(testOutDir, "TEST_OUT_DIR is required");
 await fs.mkdir(testOutDir, { recursive: true });
@@ -29,6 +32,70 @@ export const writeBytesArtifact = async (name, bytes) => {
 
 export const runCli = async ({ args = [], stdin = "" } = {}) => {
   const child = child_process.spawn(diagramGeneratorBin, args, {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+  child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+
+  child.stdin.on("error", (err) => {
+    if (err.code !== "EPIPE") {
+      throw err;
+    }
+  });
+  child.stdin.end(stdin);
+
+  const { code, signal } = await new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (statusCode, statusSignal) => resolve({ code: statusCode, signal: statusSignal }));
+  });
+
+  return {
+    code,
+    signal,
+    stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+    stderr: Buffer.concat(stderrChunks).toString("utf8"),
+  };
+};
+
+export const runSvgToPng = async ({ args = [], stdin = "" } = {}) => {
+  assert(svgToPngBin, "SVG_TO_PNG_BIN is required");
+
+  const child = child_process.spawn(svgToPngBin, args, {
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  const stdoutChunks = [];
+  const stderrChunks = [];
+  child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
+  child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
+
+  child.stdin.on("error", (err) => {
+    if (err.code !== "EPIPE") {
+      throw err;
+    }
+  });
+  child.stdin.end(stdin);
+
+  const { code, signal } = await new Promise((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", (statusCode, statusSignal) => resolve({ code: statusCode, signal: statusSignal }));
+  });
+
+  return {
+    code,
+    signal,
+    stdout: Buffer.concat(stdoutChunks),
+    stderr: Buffer.concat(stderrChunks).toString("utf8"),
+  };
+};
+
+export const runSvgFontInliner = async ({ args = [], stdin = "" } = {}) => {
+  assert(svgFontInlinerBin, "SVG_FONT_INLINER_BIN is required");
+
+  const child = child_process.spawn(svgFontInlinerBin, args, {
     stdio: ["pipe", "pipe", "pipe"],
   });
 

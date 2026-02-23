@@ -4,6 +4,7 @@ import {
   listRenderers,
   parseJson,
   runCli,
+  runSvgToPng,
   writeArtifact,
   writeBytesArtifact,
 } from "./_helpers.mjs";
@@ -209,7 +210,27 @@ jobs.sort((a, b) => {
   return a.format.localeCompare(b.format);
 });
 
-await Promise.all(jobs.map(async ({ renderer, name, code, format }) => {
+const runWithConcurrency = async (items, limit, worker) => {
+  const workerCount = Math.min(limit, items.length);
+  let nextIndex = 0;
+
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const idx = nextIndex;
+      nextIndex += 1;
+      if (idx >= items.length) {
+        return;
+      }
+      await worker(items[idx]);
+    }
+  });
+
+  await Promise.all(workers);
+};
+
+await runWithConcurrency(jobs, 3, async ({ renderer, name, code, format }) => {
+	const time = new Date().getTime();
+	console.log(`Starting render, ${renderer}, ${name}, ${format}`);
   const context = `${renderer}/${name}/${format}`;
   try {
     const payload = [{ renderer, format, code }];
@@ -231,6 +252,7 @@ await Promise.all(jobs.map(async ({ renderer, name, code, format }) => {
       const signature = pngBytes.subarray(0, 8).toString("hex");
       assert.equal(signature, "89504e470d0a1a0a", `${renderer}: output does not look like png`);
       await writeBytesArtifact(`${prefix}.png`, pngBytes);
+			console.log(`Ending render, ${renderer}, ${name}, ${format}, took: ${new Date().getTime() - time}`);
       return;
     }
 
@@ -246,10 +268,19 @@ await Promise.all(jobs.map(async ({ renderer, name, code, format }) => {
     assert(svg.includes("<svg"), `${renderer}: expected <svg in output`);
     assert(svg.includes("</svg>"), `${renderer}: expected </svg> in output`);
     await writeArtifact(`${prefix}.svg`, svg);
+
+    const interopResult = await runSvgToPng({ stdin: svg });
+    await writeArtifact(`${prefix}.svg-to-png.stderr.txt`, interopResult.stderr);
+    await writeBytesArtifact(`${prefix}.svg-to-png.stdout.png`, interopResult.stdout);
+    assertSuccess({ ...interopResult, stdout: "" });
+    assert(interopResult.stdout.length > 8, `${renderer}: svg-to-png decoded png should not be empty`);
+    const interopSignature = interopResult.stdout.subarray(0, 8).toString("hex");
+    assert.equal(interopSignature, "89504e470d0a1a0a", `${renderer}: svg output is not valid svg-to-png input`);
+		console.log(`Ending render, ${renderer}, ${name}, ${format}, took: ${new Date().getTime() - time}`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`render-matrix job failed (${context}): ${message}`);
   }
-}));
+});
 
 await writeArtifact("success.txt", "ok\n");

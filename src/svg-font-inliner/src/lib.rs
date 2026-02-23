@@ -1076,6 +1076,177 @@ where
     Ok(output_svg)
 }
 
+pub fn ensure_text_fonts_inline(input_svg: &str) -> Result<(), String> {
+    embed_svg_fonts(input_svg, |_query| {
+        Err("font is not inlined in SVG @font-face data source".to_string())
+    })
+    .map(|_| ())
+}
+
+pub fn parse_svg_tree_inline_fonts_only(input_svg: &str) -> Result<usvg::Tree, String> {
+    let cleaned_input = remove_inliner_debug_comments(input_svg);
+    let (stripped_svg, existing_faces) =
+        collect_existing_faces_and_strip_font_face_rules(&cleaned_input)?;
+    let stripped_svg = remove_empty_defs_style_blocks(&stripped_svg);
+    let stripped_svg = trim_leading_inner_whitespace(&stripped_svg);
+
+    let existing_font_temp =
+        TempDir::new().map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let mut loaded_existing_faces = Vec::<ExistingLoadedFace>::new();
+    for (idx, face) in existing_faces.iter().enumerate() {
+        let (_mime, bytes) = decode_data_url(&face.data_url)?;
+        let emit_path = existing_font_temp
+            .path()
+            .join(format!("existing-face-{idx}-emit.ttf"));
+        std::fs::write(&emit_path, bytes).map_err(|e| {
+            format!(
+                "failed to materialize existing embedded font for family '{}': {e}",
+                face.family
+            )
+        })?;
+
+        let runtime_path = if let Some(unicode_range) = &face.unicode_range {
+            let subset_path = existing_font_temp
+                .path()
+                .join(format!("existing-face-{idx}-runtime-subset.ttf"));
+            subset_font_to_unicode_range(&emit_path, &subset_path, unicode_range)?;
+            subset_path
+        } else {
+            emit_path
+        };
+
+        loaded_existing_faces.push(ExistingLoadedFace {
+            family: face.family.clone(),
+            style_css: face.style_css.clone(),
+            weight: face.weight,
+            stretch_css: face.stretch_css.clone(),
+            runtime_path,
+        });
+    }
+
+    let loaded_existing_faces = Arc::new(loaded_existing_faces);
+    let loaded_paths: Arc<Mutex<BTreeSet<PathBuf>>> = Arc::new(Mutex::new(BTreeSet::new()));
+    let loaded_paths_for_select_font = Arc::clone(&loaded_paths);
+    let loaded_paths_for_select_fallback = Arc::clone(&loaded_paths);
+    let existing_faces_for_select_font = Arc::clone(&loaded_existing_faces);
+    let existing_faces_for_select_fallback = Arc::clone(&loaded_existing_faces);
+    let resolver_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let resolver_error_for_select_font = Arc::clone(&resolver_error);
+    let resolver_error_for_select_fallback = Arc::clone(&resolver_error);
+    let face_query_context: Arc<Mutex<BTreeMap<usvg::fontdb::ID, FontQuery>>> =
+        Arc::new(Mutex::new(BTreeMap::new()));
+    let face_query_context_for_select_font = Arc::clone(&face_query_context);
+    let face_query_context_for_select_fallback = Arc::clone(&face_query_context);
+
+    let mut options = usvg::Options::default();
+    options.font_resolver = usvg::FontResolver {
+        select_font: Box::new(move |font, db| {
+            let query = font_spec_to_query(font, None);
+
+            let Some(existing_path) =
+                match_existing_face_path(&query, &existing_faces_for_select_font)
+            else {
+                if let Ok(mut slot) = resolver_error_for_select_font.lock() {
+                    if slot.is_none() {
+                        *slot =
+                            Some("font is not inlined in SVG @font-face data source".to_string());
+                    }
+                }
+                return None;
+            };
+
+            match ensure_font_loaded(db, &loaded_paths_for_select_font, &existing_path) {
+                Ok(id) => {
+                    if let Ok(mut map) = face_query_context_for_select_font.lock() {
+                        map.insert(id, query);
+                    }
+                    Some(id)
+                }
+                Err(err) => {
+                    if let Ok(mut slot) = resolver_error_for_select_font.lock() {
+                        if slot.is_none() {
+                            *slot = Some(err);
+                        }
+                    }
+                    None
+                }
+            }
+        }),
+        select_fallback: Box::new(move |missing_char, used_fonts, db| {
+            let query = match face_query_context_for_select_fallback
+                .lock()
+                .ok()
+                .and_then(|map| used_fonts.first().and_then(|id| map.get(id).cloned()))
+            {
+                Some(mut base) => {
+                    base.missing_char = Some(missing_char);
+                    base
+                }
+                None => match fallback_query_from_used_fonts(missing_char, used_fonts, db) {
+                    Ok(query) => query,
+                    Err(err) => {
+                        if let Ok(mut slot) = resolver_error_for_select_fallback.lock() {
+                            if slot.is_none() {
+                                *slot = Some(err);
+                            }
+                        }
+                        return None;
+                    }
+                },
+            };
+
+            let candidate_paths =
+                match_existing_face_paths(&query, &existing_faces_for_select_fallback);
+            for existing_path in candidate_paths {
+                let id =
+                    match ensure_font_loaded(db, &loaded_paths_for_select_fallback, &existing_path)
+                    {
+                        Ok(id) => id,
+                        Err(err) => {
+                            if let Ok(mut slot) = resolver_error_for_select_fallback.lock() {
+                                if slot.is_none() {
+                                    *slot = Some(err);
+                                }
+                            }
+                            return None;
+                        }
+                    };
+
+                if used_fonts.contains(&id) {
+                    continue;
+                }
+
+                if !db_face_supports_char(db, id, missing_char) {
+                    continue;
+                }
+
+                if let Ok(mut map) = face_query_context_for_select_fallback.lock() {
+                    map.insert(id, query.clone());
+                }
+                return Some(id);
+            }
+
+            if let Ok(mut slot) = resolver_error_for_select_fallback.lock() {
+                if slot.is_none() {
+                    *slot = Some("font is not inlined in SVG @font-face data source".to_string());
+                }
+            }
+            None
+        }),
+    };
+
+    let tree = usvg::Tree::from_data(stripped_svg.as_bytes(), &options)
+        .map_err(|e| format!("failed to parse SVG: {e}"))?;
+
+    if let Ok(slot) = resolver_error.lock() {
+        if let Some(err) = slot.as_ref() {
+            return Err(err.clone());
+        }
+    }
+
+    Ok(tree)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

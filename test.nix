@@ -23,7 +23,7 @@ let
     } ''
       set -euo pipefail
       mkdir -p "$out"
-      TEST_OUT_DIR="$out" DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "${testsDir}/${file}"
+      TEST_OUT_DIR="$out" DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator" SVG_TO_PNG_BIN="${packages.svg_to_png}/bin/svg-to-png" SVG_FONT_INLINER_BIN="${packages.svg_font_inliner}/bin/svg-font-inliner" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "${testsDir}/${file}"
     '';
 
   testNames = map (file: pkgs.lib.removeSuffix ".test.mjs" file) testFiles;
@@ -42,6 +42,10 @@ let
         name = "svg-font-inliner";
         path = packages.svg_font_inliner;
       }
+      {
+        name = "svg-to-png";
+        path = packages.svg_to_png;
+      }
     ]
   );
 
@@ -55,6 +59,8 @@ let
     ];
     shellHook = ''
       export DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator"
+      export SVG_TO_PNG_BIN="${packages.svg_to_png}/bin/svg-to-png"
+      export SVG_FONT_INLINER_BIN="${packages.svg_font_inliner}/bin/svg-font-inliner"
       export SUPPORTED_VERSIONS_JSON="${./supported-versions.json}"
       export PYFTSUBSET_BIN="${pkgs.python3Packages.fonttools}/bin/pyftsubset"
       export DG_TEST_TMP="$(mktemp -d "''${TMPDIR:-/tmp}/diagram-generator-tests.XXXXXX")"
@@ -89,6 +95,8 @@ let
       }
 
       echo "DIAGRAM_GENERATOR_BIN=$DIAGRAM_GENERATOR_BIN"
+      echo "SVG_TO_PNG_BIN=$SVG_TO_PNG_BIN"
+      echo "SVG_FONT_INLINER_BIN=$SVG_FONT_INLINER_BIN"
       echo "SUPPORTED_VERSIONS_JSON=$SUPPORTED_VERSIONS_JSON"
       echo "PYFTSUBSET_BIN=$PYFTSUBSET_BIN"
       echo "DG_TEST_TMP=$DG_TEST_TMP"
