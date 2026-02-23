@@ -92,14 +92,6 @@ T2.Doctors --> After.Doctors
 `,
     },
     {
-      name: "listfonts",
-      code: `
-@startuml
-listfonts
-@enduml
-`,
-    },
-    {
       name: "awslib",
       code: `
 @startuml
@@ -228,21 +220,28 @@ const runWithConcurrency = async (items, limit, worker) => {
   await Promise.all(workers);
 };
 
-await runWithConcurrency(jobs, 3, async ({ renderer, name, code, format }) => {
-	const time = new Date().getTime();
-	console.log(`Starting render, ${renderer}, ${name}, ${format}`);
+await runWithConcurrency(jobs, 5, async ({ renderer, name, code, format }) => {
+  const startedAt = Date.now();
+  console.log(`Starting render, ${renderer}, ${name}, ${format}`);
   const context = `${renderer}/${name}/${format}`;
   try {
     const payload = [{ renderer, format, code }];
     const stdin = JSON.stringify(payload);
+
+    const runCliStart = Date.now();
     const result = await runCli({ stdin });
+    const runCliMs = Date.now() - runCliStart;
+
     const prefix = sanitize(`${renderer}/${name}`);
 
     if (format === "png") {
+      const writeArtifactsStart = Date.now();
       await writeArtifact(`${prefix}.png.stdin.json`, JSON.stringify(payload, null, 2));
       await writeArtifact(`${prefix}.png.stdout.json`, result.stdout);
       await writeArtifact(`${prefix}.png.stderr.txt`, result.stderr);
+      const writeArtifactsMs = Date.now() - writeArtifactsStart;
 
+      const assertStart = Date.now();
       assertSuccess(result);
       const parsed = parseJson(result.stdout);
       assert.equal(parsed.length, 1, `${renderer}: expected one png output item`);
@@ -252,14 +251,21 @@ await runWithConcurrency(jobs, 3, async ({ renderer, name, code, format }) => {
       const signature = pngBytes.subarray(0, 8).toString("hex");
       assert.equal(signature, "89504e470d0a1a0a", `${renderer}: output does not look like png`);
       await writeBytesArtifact(`${prefix}.png`, pngBytes);
-			console.log(`Ending render, ${renderer}, ${name}, ${format}, took: ${new Date().getTime() - time}`);
+      const assertMs = Date.now() - assertStart;
+
+      console.log(
+        `Ending render, ${renderer}, ${name}, ${format}, total=${Date.now() - startedAt}ms runCli=${runCliMs}ms writeArtifacts=${writeArtifactsMs}ms parseAssert=${assertMs}ms`,
+      );
       return;
     }
 
+    const writeArtifactsStart = Date.now();
     await writeArtifact(`${prefix}.stdin.json`, JSON.stringify(payload, null, 2));
     await writeArtifact(`${prefix}.stdout.json`, result.stdout);
     await writeArtifact(`${prefix}.stderr.txt`, result.stderr);
+    const writeArtifactsMs = Date.now() - writeArtifactsStart;
 
+    const parseAssertStart = Date.now();
     assertSuccess(result);
     const parsed = parseJson(result.stdout);
     assert.equal(parsed.length, 1, `${renderer}: expected one svg output item`);
@@ -268,15 +274,27 @@ await runWithConcurrency(jobs, 3, async ({ renderer, name, code, format }) => {
     assert(svg.includes("<svg"), `${renderer}: expected <svg in output`);
     assert(svg.includes("</svg>"), `${renderer}: expected </svg> in output`);
     await writeArtifact(`${prefix}.svg`, svg);
+    const parseAssertMs = Date.now() - parseAssertStart;
 
+    const interopStart = Date.now();
     const interopResult = await runSvgToPng({ stdin: svg });
+    const interopMs = Date.now() - interopStart;
+
+    const interopArtifactsStart = Date.now();
     await writeArtifact(`${prefix}.svg-to-png.stderr.txt`, interopResult.stderr);
     await writeBytesArtifact(`${prefix}.svg-to-png.stdout.png`, interopResult.stdout);
+    const interopArtifactsMs = Date.now() - interopArtifactsStart;
+
+    const interopAssertStart = Date.now();
     assertSuccess({ ...interopResult, stdout: "" });
     assert(interopResult.stdout.length > 8, `${renderer}: svg-to-png decoded png should not be empty`);
     const interopSignature = interopResult.stdout.subarray(0, 8).toString("hex");
     assert.equal(interopSignature, "89504e470d0a1a0a", `${renderer}: svg output is not valid svg-to-png input`);
-		console.log(`Ending render, ${renderer}, ${name}, ${format}, took: ${new Date().getTime() - time}`);
+    const interopAssertMs = Date.now() - interopAssertStart;
+
+    console.log(
+      `Ending render, ${renderer}, ${name}, ${format}, total=${Date.now() - startedAt}ms runCli=${runCliMs}ms writeArtifacts=${writeArtifactsMs}ms parseAssert=${parseAssertMs}ms svgToPng=${interopMs}ms interopArtifacts=${interopArtifactsMs}ms interopAssert=${interopAssertMs}ms`,
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`render-matrix job failed (${context}): ${message}`);

@@ -3,12 +3,20 @@ use std::io::{self, Read, Write};
 use std::process;
 
 fn usage(binary_name: &str) {
-    eprintln!("Usage: {binary_name} [--zoom <float>] < input.svg > output.png");
+    eprintln!(
+        "Usage: {binary_name} [--zoom <float>] [--background <color>] < input.svg > output.png"
+    );
 }
 
-fn parse_args() -> Result<f32, String> {
+struct CliOptions {
+    zoom: f32,
+    background: Option<svg_to_png::BackgroundColor>,
+}
+
+fn parse_args() -> Result<CliOptions, String> {
     let mut args = env::args().skip(1);
     let mut zoom = 1.0f32;
+    let mut background = None;
 
     while let Some(arg) = args.next() {
         if arg == "--zoom" {
@@ -18,6 +26,11 @@ fn parse_args() -> Result<f32, String> {
             zoom = value
                 .parse::<f32>()
                 .map_err(|_| "--zoom must be a finite number greater than 0".to_string())?;
+        } else if arg == "--background" {
+            let value = args
+                .next()
+                .ok_or_else(|| "--background requires a color value".to_string())?;
+            background = Some(svg_to_png::BackgroundColor::parse(&value)?);
         } else if arg == "-h" || arg == "--help" {
             usage(
                 &env::args()
@@ -34,11 +47,11 @@ fn parse_args() -> Result<f32, String> {
         return Err("--zoom must be a finite number greater than 0".to_string());
     }
 
-    Ok(zoom)
+    Ok(CliOptions { zoom, background })
 }
 
 fn main() {
-    let zoom = parse_args().unwrap_or_else(|err| {
+    let options = parse_args().unwrap_or_else(|err| {
         eprintln!("{err}");
         usage(
             &env::args()
@@ -54,10 +67,11 @@ fn main() {
         process::exit(1);
     });
 
-    let png = svg_to_png::render_svg_to_png(&stdin, zoom).unwrap_or_else(|e| {
-        eprintln!("{e}");
-        process::exit(1);
-    });
+    let png = svg_to_png::render_svg_to_png(&stdin, options.zoom, options.background)
+        .unwrap_or_else(|e| {
+            eprintln!("{e}");
+            process::exit(1);
+        });
 
     io::stdout().write_all(&png).unwrap_or_else(|e| {
         eprintln!("failed to write stdout: {e}");

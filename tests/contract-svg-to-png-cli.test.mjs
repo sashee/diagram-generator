@@ -18,7 +18,7 @@ const readPngSize = (bytes) => {
   };
 };
 
-const svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><rect width=\"8\" height=\"8\" fill=\"#fff\"/></svg>";
+const svg = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"8\" height=\"8\"><circle cx=\"4\" cy=\"4\" r=\"2\" fill=\"#000\"/></svg>";
 
 const defaultRes = await runSvgToPng({ stdin: svg });
 await writeArtifact("svg-to-png.default.stderr.txt", defaultRes.stderr);
@@ -37,6 +37,23 @@ assert.equal(zoomRes.stdout.subarray(0, 8).toString("hex"), "89504e470d0a1a0a", 
 const zoomPngSize = readPngSize(zoomRes.stdout);
 assert(zoomPngSize.width > defaultPngSize.width, "zoom: expected output width to increase");
 assert(zoomPngSize.height > defaultPngSize.height, "zoom: expected output height to increase");
+
+const backgroundRes = await runSvgToPng({ args: ["--background", "#ffffff"], stdin: svg });
+await writeArtifact("svg-to-png.background.stderr.txt", backgroundRes.stderr);
+await writeBytesArtifact("svg-to-png.background.stdout.png", backgroundRes.stdout);
+assertSuccess({ ...backgroundRes, stdout: "" });
+assert(backgroundRes.stdout.length > 8, "background: expected png bytes");
+assert.notDeepEqual(
+  backgroundRes.stdout,
+  defaultRes.stdout,
+  "background: expected output bytes to differ from transparent default",
+);
+
+const badBackgroundRes = await runSvgToPng({ args: ["--background", "not-a-color"], stdin: svg });
+await writeArtifact("svg-to-png.bad-background.stderr.txt", badBackgroundRes.stderr);
+await writeBytesArtifact("svg-to-png.bad-background.stdout.bin", badBackgroundRes.stdout);
+assertFailure({ ...badBackgroundRes, stdout: "" });
+assert(badBackgroundRes.stderr.includes("--background"), "bad-background: expected background error in stderr");
 
 const badZoomRes = await runSvgToPng({ args: ["--zoom", "0"], stdin: svg });
 await writeArtifact("svg-to-png.bad-zoom.stderr.txt", badZoomRes.stderr);

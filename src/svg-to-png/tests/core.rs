@@ -4,7 +4,12 @@ use std::path::PathBuf;
 use base64::Engine;
 
 fn render(svg: &str, zoom: f32) -> Result<Vec<u8>, String> {
-    svg_to_png::render_svg_to_png(svg, zoom)
+    svg_to_png::render_svg_to_png(svg, zoom, None)
+}
+
+fn render_with_background(svg: &str, zoom: f32, background: &str) -> Result<Vec<u8>, String> {
+    let background = svg_to_png::BackgroundColor::parse(background)?;
+    svg_to_png::render_svg_to_png(svg, zoom, Some(background))
 }
 
 fn fixture_font_path(file_name: &str) -> PathBuf {
@@ -295,4 +300,24 @@ fn identical_svg_with_different_inline_fonts_produces_different_png() {
         png_a, png_b,
         "same SVG text with different inline fonts should produce different PNG bytes"
     );
+}
+
+#[test]
+fn background_color_changes_output_bytes() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><circle cx="8" cy="8" r="4" fill="#000"/></svg>"##;
+    let transparent = render(svg, 1.0).expect("transparent render should succeed");
+    let white =
+        render_with_background(svg, 1.0, "#ffffff").expect("background render should succeed");
+
+    assert_ne!(
+        transparent, white,
+        "transparent and solid background renders should differ"
+    );
+}
+
+#[test]
+fn background_color_parser_rejects_invalid_values() {
+    let err = svg_to_png::BackgroundColor::parse("not-a-color")
+        .expect_err("invalid background color should fail");
+    assert!(err.contains("--background"));
 }

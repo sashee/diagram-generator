@@ -624,6 +624,7 @@ dependencies = [
  "resvg",
  "roxmltree 0.21.1",
  "svg-font-inliner",
+ "svgtypes",
  "usvg",
 ]
 

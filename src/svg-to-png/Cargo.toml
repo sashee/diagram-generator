@@ -7,6 +7,7 @@ edition = "2021"
 resvg = "0.47"
 roxmltree = "0.21"
 svg-font-inliner = { path = "../svg-font-inliner" }
+svgtypes = "0.16"
 usvg = "0.47"
 
 [dev-dependencies]
