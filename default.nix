@@ -96,7 +96,6 @@ EOF
 ;;
     *)
 
-# no network access
 ${sandbox_run}/bin/sandbox-run -- ${diagram_generator_rs}/bin/diagram-generator-rs "$@"
 
 ;;
