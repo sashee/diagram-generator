@@ -6,7 +6,7 @@ use std::process::{self, Command};
 use caps::CapSet;
 use landlock::{
     Access, AccessFs, AccessNet, CompatLevel, Compatible, PathBeneath, PathFd, Ruleset,
-    RulesetAttr, RulesetCreatedAttr, ABI,
+    RulesetAttr, RulesetCreatedAttr, Scope, ABI,
 };
 use libseccomp::{ScmpAction, ScmpFilterContext, ScmpSyscall};
 
@@ -113,6 +113,8 @@ fn apply_landlock(private_tmp_dir: &Path) -> Result<(), String> {
         .map_err(|e| format!("failed to configure filesystem restrictions: {e}"))?
         .handle_access(AccessNet::from_all(abi))
         .map_err(|e| format!("failed to configure network restrictions: {e}"))?
+        .scope(Scope::from_all(abi))
+        .map_err(|e| format!("failed to configure scope restrictions: {e}"))?
         .create()
         .map_err(|e| format!("failed to create Landlock ruleset: {e}"))?
         .add_rule(PathBeneath::new(store_fd, fs_ro))
