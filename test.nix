@@ -2,7 +2,7 @@ let
   nixpkgs = fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.11";
   pkgs = import nixpkgs { config = {}; overlays = []; };
   fontconfig = import ./tests/default-fontconfig.nix { inherit pkgs; };
-  packages = import ./default.nix { inherit pkgs fontconfig; };
+  packages = import ./default.nix { debug = false; inherit pkgs fontconfig; };
 
   testFiles = builtins.sort (a: b: a < b) (builtins.filter
     (name: pkgs.lib.hasSuffix ".test.mjs" name)

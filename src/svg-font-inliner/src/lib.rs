@@ -5,7 +5,11 @@ use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 use base64::Engine;
-use regex::Regex;
+use lightningcss::printer::PrinterOptions;
+use lightningcss::rules::font_face::{FontFaceProperty, FontFaceRule, Source};
+use lightningcss::rules::{CssRule, CssRuleList};
+use lightningcss::stylesheet::{ParserOptions, StyleSheet};
+use lightningcss::traits::ToCss;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FontQuery {
@@ -48,91 +52,74 @@ struct ExistingLoadedFace {
     runtime_path: PathBuf,
 }
 
+#[cfg(test)]
 fn remove_inliner_debug_comments(svg: &str) -> String {
-    let mut out = String::with_capacity(svg.len());
-    let mut cursor = 0;
-    while let Some(rel_start) = svg[cursor..].find("<!-- font-embed:") {
-        let start = cursor + rel_start;
-        out.push_str(&svg[cursor..start]);
-        let tail = &svg[start..];
-        if let Some(rel_end) = tail.find("-->") {
-            cursor = start + rel_end + 3;
-        } else {
-            cursor = svg.len();
-            break;
-        }
-    }
-    out.push_str(&svg[cursor..]);
-    out
-}
-
-fn remove_empty_defs_style_blocks(svg: &str) -> String {
-    let re = Regex::new(r"(?is)<defs>\s*<style>\s*<!\[CDATA\[\s*\]\]>\s*</style>\s*</defs>")
-        .expect("valid empty defs/style regex");
-    re.replace_all(svg, "").to_string()
-}
-
-fn trim_leading_inner_whitespace(svg: &str) -> String {
-    let Some(open_end) = find_root_svg_open_tag_end(svg) else {
+    let Ok(doc) = roxmltree::Document::parse(svg) else {
         return svg.to_string();
     };
-    let rest = &svg[open_end..];
-    let trimmed = rest.trim_start_matches(char::is_whitespace);
-    if trimmed.len() == rest.len() {
+
+    let mut remove_ranges = Vec::<(usize, usize)>::new();
+    for node in doc
+        .descendants()
+        .filter(|n| n.node_type() == roxmltree::NodeType::Comment)
+    {
+        let text = node.text().unwrap_or("").trim_start();
+        if text.starts_with("svg-font-inliner:") {
+            let range = node.range();
+            remove_ranges.push((range.start, range.end));
+        }
+    }
+
+    if remove_ranges.is_empty() {
         return svg.to_string();
     }
 
+    remove_ranges.sort_by_key(|(start, _)| *start);
     let mut out = String::with_capacity(svg.len());
-    out.push_str(&svg[..open_end]);
-    out.push_str(trimmed);
+    let mut cursor = 0usize;
+    for (start, end) in remove_ranges {
+        if start > cursor {
+            out.push_str(&svg[cursor..start]);
+        }
+        cursor = end;
+    }
+    if cursor < svg.len() {
+        out.push_str(&svg[cursor..]);
+    }
+
     out
 }
 
-fn split_css_declarations(body: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut quote: Option<char> = None;
-    let mut paren_depth = 0usize;
-
-    for c in body.chars() {
+fn find_tag_end_outside_quotes(fragment: &str) -> Option<usize> {
+    let bytes = fragment.as_bytes();
+    let mut quote: Option<u8> = None;
+    for (idx, b) in bytes.iter().copied().enumerate() {
         if let Some(q) = quote {
-            current.push(c);
-            if c == q {
+            if b == q {
                 quote = None;
             }
             continue;
         }
-
-        match c {
-            '\'' | '"' => {
-                quote = Some(c);
-                current.push(c);
-            }
-            '(' => {
-                paren_depth += 1;
-                current.push(c);
-            }
-            ')' => {
-                paren_depth = paren_depth.saturating_sub(1);
-                current.push(c);
-            }
-            ';' if paren_depth == 0 => {
-                let trimmed = current.trim();
-                if !trimmed.is_empty() {
-                    out.push(trimmed.to_string());
-                }
-                current.clear();
-            }
-            _ => current.push(c),
+        match b {
+            b'\'' | b'"' => quote = Some(b),
+            b'>' => return Some(idx),
+            _ => {}
         }
     }
+    None
+}
 
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        out.push(trimmed.to_string());
+#[cfg(test)]
+fn find_root_svg_open_tag_end(svg: &str) -> Option<usize> {
+    let doc = roxmltree::Document::parse(svg).ok()?;
+    let root = doc.root_element();
+    if !root.is_element() || root.tag_name().name() != "svg" {
+        return None;
     }
-
-    out
+    let range = root.range();
+    let root_fragment = &svg[range.start..range.end];
+    let open_rel = find_tag_end_outside_quotes(root_fragment)?;
+    Some(range.start + open_rel + 1)
 }
 
 fn normalize_css_string_value(value: &str) -> String {
@@ -150,94 +137,59 @@ fn parse_weight(value: &str) -> u16 {
     value.trim().parse::<u16>().ok().unwrap_or(400)
 }
 
-fn select_first_data_url(src_value: &str) -> Option<String> {
-    let lower = src_value.to_ascii_lowercase();
-    let mut cursor = 0usize;
-    while let Some(rel_idx) = lower[cursor..].find("url(") {
-        let start = cursor + rel_idx + 4;
-        let bytes = src_value.as_bytes();
-        let mut i = start;
-        let mut quote: Option<u8> = None;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if let Some(q) = quote {
-                if b == q {
-                    quote = None;
-                }
-            } else if b == b'\'' || b == b'"' {
-                quote = Some(b);
-            } else if b == b')' {
-                let raw = src_value[start..i].trim();
-                let unquoted = if (raw.starts_with('"') && raw.ends_with('"'))
-                    || (raw.starts_with('\'') && raw.ends_with('\''))
-                {
-                    &raw[1..raw.len().saturating_sub(1)]
-                } else {
-                    raw
-                };
-                if unquoted.to_ascii_lowercase().starts_with("data:") {
-                    return Some(unquoted.to_string());
-                }
-                cursor = i + 1;
-                break;
-            }
-            i += 1;
-        }
-
-        if i >= bytes.len() {
-            break;
-        }
-    }
-
-    None
+fn css_to_string<T: ToCss>(value: &T) -> Result<String, String> {
+    value
+        .to_css_string(PrinterOptions::default())
+        .map_err(|e| format!("failed to serialize CSS value: {e}"))
 }
 
-fn parse_existing_face(block: &str) -> Result<Option<ExistingFace>, String> {
-    let open = match block.find('{') {
-        Some(v) => v,
-        None => return Ok(None),
-    };
-    let close = match block.rfind('}') {
-        Some(v) if v > open => v,
-        _ => return Ok(None),
-    };
-    let body = &block[open + 1..close];
-    let decls = split_css_declarations(body);
-
+fn parse_existing_face_rule(rule: &FontFaceRule<'_>) -> Result<Option<ExistingFace>, String> {
     let mut family: Option<String> = None;
     let mut style_css = "normal".to_string();
     let mut weight = 400u16;
     let mut stretch_css = "normal".to_string();
-    let mut src: Option<String> = None;
+    let mut data_url: Option<String> = None;
     let mut unicode_range: Option<String> = None;
 
-    for decl in decls {
-        let Some((name, value)) = decl.split_once(':') else {
-            continue;
-        };
-        let key = name.trim().to_ascii_lowercase();
-        let value = value.trim();
-        match key.as_str() {
-            "font-family" => family = Some(normalize_css_string_value(value)),
-            "font-style" => style_css = value.to_ascii_lowercase(),
-            "font-weight" => weight = parse_weight(value),
-            "font-stretch" => stretch_css = value.to_ascii_lowercase(),
-            "src" => src = Some(value.to_string()),
-            "unicode-range" => unicode_range = Some(value.to_string()),
-            _ => {}
+    for prop in &rule.properties {
+        match prop {
+            FontFaceProperty::Source(sources) => {
+                for src in sources {
+                    let Source::Url(url_source) = src else {
+                        continue;
+                    };
+                    let candidate = url_source.url.url.as_ref();
+                    if candidate.to_ascii_lowercase().starts_with("data:") {
+                        data_url = Some(candidate.to_string());
+                        break;
+                    }
+                }
+            }
+            FontFaceProperty::FontFamily(font_family) => {
+                let value = css_to_string(font_family)?;
+                family = Some(normalize_css_string_value(&value));
+            }
+            FontFaceProperty::FontStyle(font_style) => {
+                style_css = css_to_string(font_style)?.to_ascii_lowercase();
+            }
+            FontFaceProperty::FontWeight(font_weight) => {
+                let value = css_to_string(font_weight)?;
+                weight = parse_weight(&value);
+            }
+            FontFaceProperty::FontStretch(font_stretch) => {
+                stretch_css = css_to_string(font_stretch)?.to_ascii_lowercase();
+            }
+            FontFaceProperty::UnicodeRange(ranges) => {
+                unicode_range = Some(css_to_string(ranges)?);
+            }
+            FontFaceProperty::Custom(_) => {}
         }
     }
 
     let Some(family) = family else {
         return Ok(None);
     };
-    let Some(src_value) = src else {
-        return Err(format!(
-            "existing @font-face for family '{}' has no src declaration",
-            family
-        ));
-    };
-    let Some(data_url) = select_first_data_url(&src_value) else {
+    let Some(data_url) = data_url else {
         return Err(format!(
             "existing @font-face for family '{}' has no data URL src",
             family
@@ -254,95 +206,280 @@ fn parse_existing_face(block: &str) -> Result<Option<ExistingFace>, String> {
     }))
 }
 
-fn collect_existing_faces_and_strip_font_face_rules(
-    svg: &str,
-) -> Result<(String, Vec<ExistingFace>), String> {
-    let lower = svg.to_ascii_lowercase();
-    let mut scan = 0usize;
-    let mut remove_ranges = Vec::<(usize, usize)>::new();
-    let mut existing_faces = Vec::<ExistingFace>::new();
-
-    while let Some(rel_idx) = lower[scan..].find("@font-face") {
-        let start = scan + rel_idx;
-        let Some(open_rel) = svg[start..].find('{') else {
-            break;
+fn collect_existing_faces_from_style_css(
+    style_css: &str,
+) -> Result<(String, Vec<ExistingFace>, bool), String> {
+    let trimmed = style_css.trim();
+    let (css_input, had_cdata, prefix, suffix) =
+        if let Some(without_open) = trimmed.strip_prefix("<![CDATA[") {
+            if let Some(inner) = without_open.strip_suffix("]]>") {
+                let start = style_css.find(trimmed).unwrap_or(0);
+                let end = start + trimmed.len();
+                (
+                    inner,
+                    true,
+                    style_css[..start].to_string(),
+                    style_css[end..].to_string(),
+                )
+            } else {
+                (style_css, false, String::new(), String::new())
+            }
+        } else {
+            (style_css, false, String::new(), String::new())
         };
-        let open = start + open_rel;
-        let bytes = svg.as_bytes();
-        let mut i = open;
-        let mut depth = 0usize;
-        let mut quote: Option<u8> = None;
-        let mut end: Option<usize> = None;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if let Some(q) = quote {
-                if b == q {
-                    quote = None;
-                }
-            } else if b == b'\'' || b == b'"' {
-                quote = Some(b);
-            } else if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                if depth == 0 {
-                    break;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    end = Some(i + 1);
-                    break;
+
+    let mut stylesheet = StyleSheet::parse(css_input, ParserOptions::default())
+        .map_err(|e| format!("failed to parse <style> CSS: {e}"))?;
+
+    let mut existing_faces = Vec::<ExistingFace>::new();
+    let mut kept_rules = Vec::new();
+    for rule in stylesheet.rules.0.drain(..) {
+        match rule {
+            CssRule::FontFace(face_rule) => {
+                if let Some(face) = parse_existing_face_rule(&face_rule)? {
+                    existing_faces.push(face);
                 }
             }
-            i += 1;
+            other => kept_rules.push(other),
         }
+    }
+    let has_non_font_rules = !kept_rules.is_empty();
+    stylesheet.rules = CssRuleList(kept_rules);
 
-        let Some(end) = end else {
-            return Err("failed to parse existing @font-face block".to_string());
-        };
-        let block = &svg[start..end];
-        if let Some(face) = parse_existing_face(block)? {
-            existing_faces.push(face);
-        }
-        remove_ranges.push((start, end));
-        scan = end;
+    let cleaned_css = stylesheet
+        .to_css(PrinterOptions::default())
+        .map_err(|e| format!("failed to serialize <style> CSS: {e}"))?
+        .code;
+
+    let cleaned_css = if had_cdata {
+        format!("{prefix}<![CDATA[{cleaned_css}]]>{suffix}")
+    } else {
+        cleaned_css
+    };
+
+    Ok((cleaned_css, existing_faces, has_non_font_rules))
+}
+
+fn collect_existing_faces_and_strip_font_face_rules(
+    svg: &str,
+) -> Result<(String, Vec<ExistingFace>, usize), String> {
+    let doc = roxmltree::Document::parse(svg).map_err(|e| format!("failed to parse SVG: {e}"))?;
+
+    let root = doc.root_element();
+    if !root.is_element() || root.tag_name().name() != "svg" {
+        return Err("failed to parse SVG: missing root <svg> element".to_string());
+    }
+    let root_range = root.range();
+    let root_fragment = &svg[root_range.start..root_range.end];
+    let root_open_rel = find_tag_end_outside_quotes(root_fragment)
+        .ok_or_else(|| "failed to locate root <svg> opening tag end".to_string())?;
+    let root_open_end = root_range.start + root_open_rel + 1;
+
+    #[derive(Clone)]
+    struct Replacement {
+        start: usize,
+        end: usize,
+        replacement: String,
+        is_removal: bool,
     }
 
-    if remove_ranges.is_empty() {
-        return Ok((svg.to_string(), existing_faces));
+    let mut replacements = Vec::<Replacement>::new();
+    let mut existing_faces = Vec::<ExistingFace>::new();
+
+    for node in doc
+        .descendants()
+        .filter(|n| n.node_type() == roxmltree::NodeType::Comment)
+    {
+        let text = node.text().unwrap_or("").trim_start();
+        if text.starts_with("svg-font-inliner:") {
+            let range = node.range();
+            replacements.push(Replacement {
+                start: range.start,
+                end: range.end,
+                replacement: String::new(),
+                is_removal: true,
+            });
+        }
+    }
+
+    for node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "style")
+    {
+        let range = node.range();
+        let style_fragment = &svg[range.start..range.end];
+
+        let Some(open_tag_end) = find_tag_end_outside_quotes(style_fragment) else {
+            continue;
+        };
+        let fallback_css_start = range.start + open_tag_end + 1;
+        let css_start = node
+            .first_child()
+            .map(|n| n.range().start)
+            .unwrap_or(fallback_css_start);
+        let css_end = node
+            .last_child()
+            .map(|n| n.range().end)
+            .unwrap_or(css_start);
+        if css_end < css_start {
+            continue;
+        }
+
+        let style_css = &svg[css_start..css_end];
+        let (cleaned_css, mut parsed_faces, has_non_font_rules) =
+            collect_existing_faces_from_style_css(style_css)?;
+        existing_faces.append(&mut parsed_faces);
+
+        if has_non_font_rules && cleaned_css == style_css {
+            continue;
+        }
+
+        if !has_non_font_rules {
+            replacements.push(Replacement {
+                start: range.start,
+                end: range.end,
+                replacement: String::new(),
+                is_removal: true,
+            });
+            continue;
+        }
+
+        let inner_start = css_start.saturating_sub(range.start);
+        let inner_end = css_end.saturating_sub(range.start);
+        let mut replacement = String::with_capacity(style_fragment.len() + cleaned_css.len());
+        replacement.push_str(&style_fragment[..inner_start]);
+        replacement.push_str(&cleaned_css);
+        replacement.push_str(&style_fragment[inner_end..]);
+        replacements.push(Replacement {
+            start: range.start,
+            end: range.end,
+            replacement,
+            is_removal: false,
+        });
+    }
+
+    for node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "defs")
+    {
+        let mut meaningful_child_found = false;
+        for child in node.children() {
+            if child.is_text() {
+                if !child.text().unwrap_or("").trim().is_empty() {
+                    meaningful_child_found = true;
+                    break;
+                }
+                continue;
+            }
+
+            let child_range = child.range();
+            let child_removed = replacements
+                .iter()
+                .any(|r| r.is_removal && r.start <= child_range.start && r.end >= child_range.end);
+            if !child_removed {
+                meaningful_child_found = true;
+                break;
+            }
+        }
+
+        if !meaningful_child_found {
+            let range = node.range();
+            replacements.push(Replacement {
+                start: range.start,
+                end: range.end,
+                replacement: String::new(),
+                is_removal: true,
+            });
+        }
+    }
+
+    if replacements.is_empty() {
+        let rest = &svg[root_open_end..];
+        let trimmed = rest.trim_start_matches(char::is_whitespace);
+        if trimmed.len() == rest.len() {
+            return Ok((svg.to_string(), existing_faces, root_open_end));
+        }
+        let mut out = String::with_capacity(svg.len());
+        out.push_str(&svg[..root_open_end]);
+        out.push_str(trimmed);
+        return Ok((out, existing_faces, root_open_end));
+    }
+
+    replacements.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
+
+    let mut final_replacements = Vec::<Replacement>::new();
+    for replacement in replacements {
+        let shadowed_by_removal = final_replacements.iter().any(|existing| {
+            existing.is_removal
+                && existing.start <= replacement.start
+                && existing.end >= replacement.end
+        });
+        if !shadowed_by_removal {
+            final_replacements.push(replacement);
+        }
+    }
+
+    let mut adjusted_root_open_end = root_open_end;
+    for replacement in &final_replacements {
+        if replacement.end <= root_open_end {
+            let old_len = replacement.end - replacement.start;
+            let new_len = replacement.replacement.len();
+            if new_len >= old_len {
+                adjusted_root_open_end += new_len - old_len;
+            } else {
+                adjusted_root_open_end -= old_len - new_len;
+            }
+        }
     }
 
     let mut cleaned = String::with_capacity(svg.len());
     let mut cursor = 0usize;
-    for (start, end) in remove_ranges {
-        if start > cursor {
-            cleaned.push_str(&svg[cursor..start]);
+    for replacement in final_replacements {
+        if replacement.start > cursor {
+            cleaned.push_str(&svg[cursor..replacement.start]);
         }
-        cursor = end;
+        cleaned.push_str(&replacement.replacement);
+        cursor = replacement.end;
     }
     if cursor < svg.len() {
         cleaned.push_str(&svg[cursor..]);
     }
 
-    Ok((cleaned, existing_faces))
+    let rest = &cleaned[adjusted_root_open_end..];
+    let trimmed = rest.trim_start_matches(char::is_whitespace);
+    if trimmed.len() == rest.len() {
+        return Ok((cleaned, existing_faces, adjusted_root_open_end));
+    }
+
+    let mut out = String::with_capacity(cleaned.len());
+    out.push_str(&cleaned[..adjusted_root_open_end]);
+    out.push_str(trimmed);
+    Ok((out, existing_faces, adjusted_root_open_end))
+}
+
+fn has_base64_header(data_url: &str) -> bool {
+    let trimmed = data_url.trim();
+    let Some((prefix, _)) = trimmed.split_once(',') else {
+        return false;
+    };
+    prefix.to_ascii_lowercase().trim_end().ends_with(";base64")
 }
 
 fn decode_data_url(data_url: &str) -> Result<(String, Vec<u8>), String> {
-    let lower = data_url.to_ascii_lowercase();
-    if !lower.starts_with("data:") {
-        return Err("expected data URL source".to_string());
-    }
-    let without_prefix = &data_url["data:".len()..];
-    let Some((meta, payload)) = without_prefix.split_once(',') else {
-        return Err("invalid data URL: missing ',' separator".to_string());
-    };
-    if !meta.to_ascii_lowercase().ends_with(";base64") {
+    let parsed =
+        data_url::DataUrl::process(data_url).map_err(|_| "expected data URL source".to_string())?;
+
+    if !has_base64_header(data_url) {
         return Err("invalid data URL: expected ';base64' payload".to_string());
     }
-    let mime = meta[..meta.len() - ";base64".len()].trim().to_string();
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(payload)
+
+    let mime = parsed.mime_type();
+    let mime_value = format!("{}/{}", mime.type_, mime.subtype);
+    let (bytes, _) = parsed
+        .decode_to_vec()
         .map_err(|e| format!("invalid base64 payload in data URL: {e}"))?;
-    Ok((mime, bytes))
+
+    Ok((mime_value, bytes))
 }
 
 fn match_existing_face_path(
@@ -657,27 +794,6 @@ fn build_css(
     css
 }
 
-fn find_root_svg_open_tag_end(svg: &str) -> Option<usize> {
-    let start = svg.find("<svg")?;
-    let bytes = svg.as_bytes();
-    let mut i = start;
-    let mut quote: Option<u8> = None;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if let Some(q) = quote {
-            if b == q {
-                quote = None;
-            }
-        } else if b == b'\'' || b == b'"' {
-            quote = Some(b);
-        } else if b == b'>' {
-            return Some(i + 1);
-        }
-        i += 1;
-    }
-    None
-}
-
 fn build_debug_comments(debug_entries: &[ResolveDebug]) -> Result<String, String> {
     let mut out = String::new();
     for debug in debug_entries {
@@ -694,16 +810,28 @@ fn build_debug_comments(debug_entries: &[ResolveDebug]) -> Result<String, String
         let mut serialized = serde_json::to_string(&json)
             .map_err(|e| format!("failed to serialize debug comment: {e}"))?;
         serialized = serialized.replace("--", "- -");
-        out.push_str("<!-- font-embed: ");
+        out.push_str("<!-- svg-font-inliner: ");
         out.push_str(&serialized);
         out.push_str(" -->\n");
     }
     Ok(out)
 }
 
-fn inject_style_block(svg: &str, debug_comments: &str, css: &str) -> Result<String, String> {
-    let insert_at = find_root_svg_open_tag_end(svg)
-        .ok_or_else(|| "failed to find root <svg> opening tag".to_string())?;
+fn emit_font_embed_debug_comments() -> bool {
+    std::env::var("SVG_FONT_EMBED_DEBUG")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+fn inject_style_block_at(
+    svg: &str,
+    insert_at: usize,
+    debug_comments: &str,
+    css: &str,
+) -> Result<String, String> {
+    if insert_at > svg.len() {
+        return Err("failed to find root <svg> opening tag".to_string());
+    }
     let style_block = format!("{debug_comments}<defs><style><![CDATA[\n{css}]]></style></defs>");
     let mut out = String::with_capacity(svg.len() + style_block.len());
     out.push_str(&svg[..insert_at]);
@@ -712,15 +840,19 @@ fn inject_style_block(svg: &str, debug_comments: &str, css: &str) -> Result<Stri
     Ok(out)
 }
 
+#[cfg(test)]
+fn inject_style_block(svg: &str, debug_comments: &str, css: &str) -> Result<String, String> {
+    let insert_at = find_root_svg_open_tag_end(svg)
+        .ok_or_else(|| "failed to find root <svg> opening tag".to_string())?;
+    inject_style_block_at(svg, insert_at, debug_comments, css)
+}
+
 pub fn embed_svg_fonts<F>(input_svg: &str, resolver: F) -> Result<String, String>
 where
     F: Fn(&FontQuery) -> Result<PathBuf, String> + Send + Sync + 'static,
 {
-    let cleaned_input = remove_inliner_debug_comments(input_svg);
-    let (stripped_svg, existing_faces) =
-        collect_existing_faces_and_strip_font_face_rules(&cleaned_input)?;
-    let stripped_svg = remove_empty_defs_style_blocks(&stripped_svg);
-    let stripped_svg = trim_leading_inner_whitespace(&stripped_svg);
+    let (stripped_svg, existing_faces, root_open_end) =
+        collect_existing_faces_and_strip_font_face_rules(input_svg)?;
 
     let existing_font_temp =
         TempDir::new().map_err(|e| format!("failed to create temp dir: {e}"))?;
@@ -1070,8 +1202,12 @@ where
         return Err("no font requests were found; refusing to emit unchanged SVG".to_string());
     }
 
-    let debug_comments = build_debug_comments(&resolve_debug)?;
-    let output_svg = inject_style_block(&stripped_svg, &debug_comments, &css)?;
+    let debug_comments = if emit_font_embed_debug_comments() {
+        build_debug_comments(&resolve_debug)?
+    } else {
+        String::new()
+    };
+    let output_svg = inject_style_block_at(&stripped_svg, root_open_end, &debug_comments, &css)?;
 
     Ok(output_svg)
 }
@@ -1084,11 +1220,8 @@ pub fn ensure_text_fonts_inline(input_svg: &str) -> Result<(), String> {
 }
 
 pub fn parse_svg_tree_inline_fonts_only(input_svg: &str) -> Result<usvg::Tree, String> {
-    let cleaned_input = remove_inliner_debug_comments(input_svg);
-    let (stripped_svg, existing_faces) =
-        collect_existing_faces_and_strip_font_face_rules(&cleaned_input)?;
-    let stripped_svg = remove_empty_defs_style_blocks(&stripped_svg);
-    let stripped_svg = trim_leading_inner_whitespace(&stripped_svg);
+    let (stripped_svg, existing_faces, _root_open_end) =
+        collect_existing_faces_and_strip_font_face_rules(input_svg)?;
 
     let existing_font_temp =
         TempDir::new().map_err(|e| format!("failed to create temp dir: {e}"))?;
@@ -1257,7 +1390,7 @@ mod tests {
         let input = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>hello</text></svg>";
         let out = inject_style_block(
             input,
-            "<!-- font-embed: {\"debug\":true} -->\n",
+            "<!-- svg-font-inliner: {\"debug\":true} -->\n",
             "@font-face { font-family: \"x\"; }",
         )
         .expect("injection should succeed");
@@ -1265,6 +1398,40 @@ mod tests {
         assert!(out.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
         assert!(out.contains("<text>hello</text>"));
         assert!(out.contains("@font-face"));
+    }
+
+    #[test]
+    fn inject_style_block_ignores_svg_marker_inside_comment() {
+        let input = "<!-- prelude <svg fake-root> -->\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>hello</text></svg>";
+        let out = inject_style_block(input, "", "@font-face { font-family: \"x\"; }")
+            .expect("injection should succeed");
+
+        let root_idx = out
+            .find("<svg xmlns=\"http://www.w3.org/2000/svg\">")
+            .expect("expected real root svg element");
+        let style_idx = out
+            .find("<defs><style><![CDATA[")
+            .expect("expected injected style block");
+        assert!(
+            style_idx > root_idx,
+            "style block should be inserted inside real root svg, not inside comments"
+        );
+    }
+
+    #[test]
+    fn remove_inliner_debug_comments_keeps_unrelated_comments() {
+        let input = "<!-- keep-me -->\n<!-- svg-font-inliner: {\"debug\":true} -->\n<svg xmlns=\"http://www.w3.org/2000/svg\"/>";
+        let out = remove_inliner_debug_comments(input);
+        assert!(out.contains("<!-- keep-me -->"));
+        assert!(!out.contains("svg-font-inliner:"));
+    }
+
+    #[test]
+    fn decode_data_url_accepts_leading_whitespace() {
+        let url = " \t\n data:font/ttf;base64,AA==";
+        let (mime, bytes) = decode_data_url(url).expect("data URL should decode");
+        assert_eq!(mime, "font/ttf");
+        assert_eq!(bytes, vec![0u8]);
     }
 
     #[test]

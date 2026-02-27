@@ -68,7 +68,7 @@ for (const [engine, renderers] of Object.entries(available)) {
 
     const svg = parsed[0].result;
     assertInlinedFonts(svg, `${renderer}`);
-    assert(svg.includes("<!-- font-embed:"), `${renderer}: expected font-embed debug comment`);
+    assert(!svg.includes("<!-- svg-font-inliner:"), `${renderer}: expected no svg-font-inliner debug comment`);
     await writeArtifact(`${prefix}.svg`, svg);
   }
 }

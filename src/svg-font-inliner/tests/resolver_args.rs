@@ -2,6 +2,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
+use lightningcss::printer::PrinterOptions;
+use lightningcss::rules::CssRule;
+use lightningcss::stylesheet::{ParserOptions, StyleSheet};
+use lightningcss::traits::ToCss;
 use svg_font_inliner::{embed_svg_fonts, FontQuery};
 
 fn fixture_font_path(file_name: &str) -> PathBuf {
@@ -632,6 +636,192 @@ fn existing_font_face_without_any_data_src_errors() {
     assert!(
         err.contains("data"),
         "expected data-source validation error, got: {err}"
+    );
+}
+
+#[test]
+fn style_with_font_face_and_other_rules_preserves_non_font_rules() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'MixedSans';
+        font-style: normal;
+        font-weight: 400;
+        src: url({data_url}) format('truetype');
+      }}
+
+      .label {{
+        fill: #cc0000;
+      }}
+    ]]></style>
+  </defs>
+  <text class="label" x="10" y="40" font-family="'MixedSans'">A</text>
+</svg>"#
+    );
+
+    let calls: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+    let calls_for_resolver = Arc::clone(&calls);
+    let output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Err("resolver should not be called when embedded data source is present".to_string())
+    })
+    .expect("embedding should succeed and preserve non-font style rules");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when existing data URL font-face is available"
+    );
+
+    let doc = roxmltree::Document::parse(&output).expect("output should remain valid SVG XML");
+    let mut found_label_style_rule = false;
+    let mut found_font_face_rule = false;
+
+    for style_node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "style")
+    {
+        let css = style_node.text().unwrap_or("");
+        let stylesheet = StyleSheet::parse(css, ParserOptions::default())
+            .expect("output style content should be valid CSS");
+
+        for rule in &stylesheet.rules.0 {
+            match rule {
+                CssRule::FontFace(_) => {
+                    found_font_face_rule = true;
+                }
+                CssRule::Style(style_rule) => {
+                    let selector_css = style_rule
+                        .selectors
+                        .to_css_string(PrinterOptions::default())
+                        .expect("selector should serialize");
+                    if selector_css.contains(".label") {
+                        found_label_style_rule = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    assert!(
+        found_label_style_rule,
+        "expected non-font .label rule to be preserved"
+    );
+    assert!(
+        found_font_face_rule,
+        "expected output to include at least one @font-face rule"
+    );
+}
+
+#[test]
+fn defs_with_non_style_content_is_preserved_when_font_face_only_style_is_removed() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'DefsMixedSans';
+        font-style: normal;
+        font-weight: 400;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+    <linearGradient id="kept-gradient">
+      <stop offset="0%" stop-color="#ff0000"/>
+      <stop offset="100%" stop-color="#0000ff"/>
+    </linearGradient>
+  </defs>
+  <text x="10" y="40" font-family="'DefsMixedSans'">A</text>
+</svg>"##
+    );
+
+    let output = embed_svg_fonts(&svg, |_query| {
+        Err("resolver should not be called when embedded data source is present".to_string())
+    })
+    .expect("embedding should succeed");
+
+    let doc = roxmltree::Document::parse(&output).expect("output should remain valid SVG XML");
+
+    let defs_count = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "defs")
+        .count();
+    assert!(defs_count > 0, "expected <defs> to remain present");
+
+    let gradient_exists = doc.descendants().any(|n| {
+        n.is_element()
+            && n.tag_name().name() == "linearGradient"
+            && n.attribute("id") == Some("kept-gradient")
+    });
+    assert!(
+        gradient_exists,
+        "expected non-style defs content to be preserved"
+    );
+}
+
+#[test]
+fn style_open_tag_with_gt_in_attribute_value_is_handled_correctly() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style data-note="a > b"><![CDATA[
+      @font-face {{
+        font-family: 'AttrGtSans';
+        font-style: normal;
+        font-weight: 400;
+        src: url({data_url}) format('truetype');
+      }}
+
+      .label {{
+        fill: red;
+      }}
+    ]]></style>
+  </defs>
+  <text class="label" x="10" y="40" font-family="'AttrGtSans'">A</text>
+</svg>"#
+    );
+
+    let output = embed_svg_fonts(&svg, |_query| {
+        Err("resolver should not be called when embedded data source is present".to_string())
+    })
+    .expect("embedding should succeed when style attribute contains '>'");
+
+    let doc = roxmltree::Document::parse(&output).expect("output should remain valid SVG XML");
+    let mut found_label_style_rule = false;
+
+    for style_node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "style")
+    {
+        let css = style_node.text().unwrap_or("");
+        let stylesheet = StyleSheet::parse(css, ParserOptions::default())
+            .expect("output style content should be valid CSS");
+
+        for rule in &stylesheet.rules.0 {
+            if let CssRule::Style(style_rule) = rule {
+                let selector_css = style_rule
+                    .selectors
+                    .to_css_string(PrinterOptions::default())
+                    .expect("selector should serialize");
+                if selector_css.contains(".label") {
+                    found_label_style_rule = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        found_label_style_rule,
+        "expected .label rule to be preserved when style open-tag attribute contains '>'"
     );
 }
 

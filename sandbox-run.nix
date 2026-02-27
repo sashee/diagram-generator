@@ -1,11 +1,13 @@
-{pkgs ? import (fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.11") { config = {}; overlays = []; }}:
+{
+  debug,
+  pkgs,
+}:
 pkgs.rustPlatform.buildRustPackage {
   pname = "sandbox-run";
   version = "0.1.0";
+  buildType = "release";
 
-  src = ./src;
-  cargoRoot = "sandbox-run";
-  buildAndTestSubdir = "sandbox-run";
+  src = pkgs.nix-gitignore.gitignoreSourcePure [ ./.gitignore ] ./src/sandbox-run;
   cargoLock = {
     lockFile = ./src/sandbox-run/Cargo.lock;
   };

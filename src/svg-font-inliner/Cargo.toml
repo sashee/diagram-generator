@@ -5,7 +5,9 @@ edition = "2021"
 
 [dependencies]
 base64 = "0.22"
-regex = "1"
+data-url = "0.3"
+lightningcss = "1.0.0-alpha.70"
+roxmltree = "0.21"
 serde_json = "1.0"
 tempfile = "3"
 ttf-parser = "0.25"

@@ -1,10 +1,14 @@
 {
-  pkgs ? import (fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.11") { config = {}; overlays = []; },
-  sandbox_run ? import ./sandbox-run.nix { inherit pkgs; },
+  debug,
+  pkgs,
 }:
+let
+	sandbox_run = import ./sandbox-run.nix { inherit debug pkgs; };
+in
 pkgs.rustPlatform.buildRustPackage {
   pname = "svg-font-inliner";
   version = "0.1.0";
+  buildType = "release";
 
   nativeBuildInputs = [
     pkgs.makeWrapper
@@ -12,7 +16,7 @@ pkgs.rustPlatform.buildRustPackage {
     pkgs.python3Packages.fonttools
   ];
 
-  src = ./src/svg-font-inliner;
+  src = pkgs.nix-gitignore.gitignoreSourcePure [ ./.gitignore ] ./src/svg-font-inliner;
   cargoLock = {
     lockFile = ./src/svg-font-inliner/Cargo.lock;
   };
@@ -28,6 +32,7 @@ pkgs.rustPlatform.buildRustPackage {
     makeWrapper ${sandbox_run}/bin/sandbox-run $out/bin/svg-font-inliner \
       --add-flags -- \
       --add-flags $out/bin/.svg-font-inliner-real \
+      --set SVG_FONT_EMBED_DEBUG ${if debug then "1" else "0"} \
       --set PYFTSUBSET_BIN ${pkgs.python3Packages.fonttools}/bin/pyftsubset \
       --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.fontconfig pkgs.python3Packages.fonttools]}
   '';

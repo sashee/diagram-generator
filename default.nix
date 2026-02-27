@@ -2,22 +2,47 @@
 	plantuml_versions ? (builtins.fromJSON (builtins.readFile ./supported-versions.json)).plantuml,
 	recharts_versions ? (builtins.fromJSON (builtins.readFile ./supported-versions.json)).recharts,
 	swirly_versions ? (builtins.fromJSON (builtins.readFile ./supported-versions.json)).swirly,
+	debug ? false,
 	fontconfig,
 	pkgs,
 }:
 let
-	sandbox_run = import ./sandbox-run.nix { inherit pkgs; };
+	sandbox_run = import ./sandbox-run.nix { inherit debug pkgs; };
 	svg_font_inliner = import ./svg-font-inliner.nix {
-		inherit pkgs sandbox_run;
+		inherit debug pkgs;
 	};
 	svg_to_png = import ./svg-to-png.nix {
-		inherit pkgs sandbox_run;
+		inherit debug pkgs;
+	};
+	srcRoot = ./src;
+	gitignorePredicate = pkgs.nix-gitignore.gitignoreFilter (builtins.readFile ./.gitignore) srcRoot;
+	diagramGeneratorSrc = builtins.path {
+		path = srcRoot;
+		name = "src-diagram-generator";
+		filter = path: type:
+			let
+				pathStr = toString path;
+				rootStr = toString srcRoot;
+				relPath = if pathStr == rootStr then "" else pkgs.lib.removePrefix "${rootStr}/" pathStr;
+				includePrefixes = [
+					"diagram-generator"
+					"svg-font-inliner"
+				];
+				isIncluded =
+					relPath == ""
+					|| pkgs.lib.any (
+						prefix:
+						relPath == prefix || pkgs.lib.hasPrefix "${prefix}/" relPath
+					) includePrefixes;
+			in
+			isIncluded && gitignorePredicate pathStr type;
 	};
 	diagram_generator_rs = pkgs.rustPlatform.buildRustPackage {
 		pname = "diagram-generator-rs";
 		version = "0.1.0";
+		buildType = "release";
 
-		src = ./src;
+		src = diagramGeneratorSrc;
 		cargoRoot = "diagram-generator";
 		buildAndTestSubdir = "diagram-generator";
 		cargoLock = {
@@ -69,6 +94,7 @@ ${builtins.toJSON validated_available_renderers}
 EOF
 )
 export FONTCONFIG_FILE=${fontconfig}
+export SVG_FONT_EMBED_DEBUG=${if debug then "1" else "0"}
 export PYFTSUBSET_BIN=${pkgs.python3Packages.fonttools}/bin/pyftsubset
 export PATH=${pkgs.lib.makeBinPath [pkgs.fontconfig pkgs.python3Packages.fonttools]}:$PATH
 
