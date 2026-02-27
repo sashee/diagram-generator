@@ -29,8 +29,6 @@ cat ${./aot_testfiles.txt} | ${pkgs.jdk24}/bin/java -XX:AOTMode=create -XX:AOTCo
 			wrapper = pkgs.writeShellScriptBin "plantuml" ''
 ${setup}
 
-${pkgs.landrun}/bin/landrun --env FONTCONFIG_FILE --env JAVA_TOOL_OPTIONS --env PLANTUML_LIMIT_SIZE --env GRAPHVIZ_DOT --env PLANTUML_SECURITY_PROFILE \
---env PATH --env TMPDIR --rox /nix --rwx $TMPDIR --rwx /dev/random \
 ${pkgs.jdk24}/bin/java -XX:AOTCache=${jsa}/app.aot -XX:AOTMode=on -jar ${src} "$@"
 	'';
 

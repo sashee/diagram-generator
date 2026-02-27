@@ -6,8 +6,13 @@
 	pkgs,
 }:
 let
-	svg_font_inliner = import ./svg-font-inliner.nix { inherit pkgs; };
-	svg_to_png = import ./svg-to-png.nix { inherit pkgs; };
+	sandbox_run = import ./sandbox-run.nix { inherit pkgs; };
+	svg_font_inliner = import ./svg-font-inliner.nix {
+		inherit pkgs sandbox_run;
+	};
+	svg_to_png = import ./svg-to-png.nix {
+		inherit pkgs sandbox_run;
+	};
 	diagram_generator_rs = pkgs.rustPlatform.buildRustPackage {
 		pname = "diagram-generator-rs";
 		version = "0.1.0";
@@ -92,16 +97,7 @@ EOF
     *)
 
 # no network access
-${pkgs.landrun}/bin/landrun \
-	--unrestricted-filesystem \
-	--env AVAILABLE_RENDERERS \
-	--env FONTCONFIG_FILE \
-	--env PYFTSUBSET_BIN \
-	--env PATH \
-	--env TMP \
-	--env TEMP \
-	--env TMPDIR \
-${diagram_generator_rs}/bin/diagram-generator-rs "$@"
+${sandbox_run}/bin/sandbox-run -- ${diagram_generator_rs}/bin/diagram-generator-rs "$@"
 
 ;;
 esac
@@ -109,6 +105,7 @@ esac
 	'';
 in {
 	inherit bin;
+	inherit sandbox_run;
 	inherit svg_font_inliner;
 	inherit svg_to_png;
 }

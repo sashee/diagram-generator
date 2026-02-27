@@ -1,0 +1,11 @@
+[package]
+name = "sandbox-run"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+caps = "0.5"
+landlock = "0.4"
+libseccomp = "0.4"
+rustix = { version = "1", features = ["thread"] }
+tempfile = "3"
