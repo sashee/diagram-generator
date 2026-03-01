@@ -1149,8 +1149,8 @@ name = "svg-font-inliner"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "data-url 0.3.2",
  "lightningcss",
- "regex",
  "roxmltree 0.21.1",
  "serde_json",
  "tempfile",
