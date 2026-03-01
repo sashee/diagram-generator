@@ -640,6 +640,814 @@ fn existing_font_face_without_any_data_src_errors() {
 }
 
 #[test]
+fn existing_font_face_with_relative_weight_errors() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'RelativeWeight';
+        font-style: normal;
+        font-weight: bolder;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'RelativeWeight'">A</text>
+</svg>"#
+    );
+
+    let err = embed_svg_fonts(&svg, |_query| Ok(fixture_font_path("font-a.ttf")))
+        .expect_err("@font-face with relative weight should fail");
+    assert!(
+        err.contains("relative font-weight") || err.contains("bolder") || err.contains("lighter"),
+        "expected relative font-weight error, got: {err}"
+    );
+}
+
+#[test]
+fn existing_font_face_with_relative_weight_lighter_errors() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'RelativeWeightLighter';
+        font-style: normal;
+        font-weight: lighter;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'RelativeWeightLighter'">A</text>
+</svg>"#
+    );
+
+    let err = embed_svg_fonts(&svg, |_query| Ok(fixture_font_path("font-a.ttf")))
+        .expect_err("@font-face with relative weight should fail");
+    assert!(
+        err.contains("relative font-weight") || err.contains("bolder") || err.contains("lighter"),
+        "expected relative font-weight error, got: {err}"
+    );
+}
+
+#[test]
+fn existing_font_face_weight_range_matches_middle_value() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'RangeMid';
+        font-style: normal;
+        font-weight: 100 300;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'RangeMid'" font-weight="200">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when range includes requested weight"
+    );
+}
+
+#[test]
+fn existing_font_face_weight_range_matches_lower_bound() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'RangeLower';
+        font-style: normal;
+        font-weight: 100 300;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'RangeLower'" font-weight="100">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when query is at lower bound"
+    );
+}
+
+#[test]
+fn existing_font_face_weight_range_matches_upper_bound() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'RangeUpper';
+        font-style: normal;
+        font-weight: 100 300;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'RangeUpper'" font-weight="300">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when query is at upper bound"
+    );
+}
+
+#[test]
+fn existing_font_face_weight_range_outside_does_not_match() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'RangeOutside';
+        font-style: normal;
+        font-weight: 100 300;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'RangeOutside'" font-weight="301">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed by using resolver for out-of-range weight");
+
+    assert!(output.contains("@font-face"));
+    assert!(
+        *calls.lock().expect("call counter mutex poisoned") >= 1,
+        "resolver should be called when requested weight is outside existing range"
+    );
+}
+
+#[test]
+fn existing_font_face_weight_descending_range_errors() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'RangeDescending';
+        font-style: normal;
+        font-weight: 300 100;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'RangeDescending'" font-weight="200">A</text>
+</svg>"#
+    );
+
+    let err = embed_svg_fonts(&svg, |_query| Ok(fixture_font_path("font-b.ttf")))
+        .expect_err("descending @font-face weight range should fail");
+    assert!(
+        err.contains("range") || err.contains("descending") || err.contains("font-weight"),
+        "expected range-order validation error, got: {err}"
+    );
+}
+
+#[test]
+fn existing_font_face_weight_overlapping_ranges_match_without_resolver() {
+    let data_url_a = fixture_data_url("font-a.ttf");
+    let data_url_b = fixture_data_url("font-b.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="90">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'RangeOverlap';
+        font-style: normal;
+        font-weight: 100 500;
+        src: url({data_url_a}) format('truetype');
+      }}
+      @font-face {{
+        font-family: 'RangeOverlap';
+        font-style: normal;
+        font-weight: 400 700;
+        src: url({data_url_b}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'RangeOverlap'" font-weight="450">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-c.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when at least one overlap range includes requested weight"
+    );
+}
+
+#[test]
+fn existing_font_face_single_weight_stays_exact_match() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'SingleExact';
+        font-style: normal;
+        font-weight: 300;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'SingleExact'" font-weight="301">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed by using resolver for non-matching single weight");
+
+    assert!(output.contains("@font-face"));
+    assert!(
+        *calls.lock().expect("call counter mutex poisoned") >= 1,
+        "resolver should be called when query does not exactly match single descriptor weight"
+    );
+}
+
+#[test]
+fn existing_font_face_missing_weight_defaults_to_400() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'MissingWeight';
+        font-style: normal;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'MissingWeight'">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when missing descriptor defaults to 400 and query is default 400"
+    );
+}
+
+#[test]
+fn existing_font_face_stretch_range_matches_middle_value() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StretchRangeMid';
+        font-style: normal;
+        font-stretch: condensed expanded;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StretchRangeMid'" font-stretch="normal">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when stretch range includes requested stretch"
+    );
+}
+
+#[test]
+fn existing_font_face_stretch_range_matches_lower_bound() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StretchRangeLower';
+        font-style: normal;
+        font-stretch: condensed expanded;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StretchRangeLower'" font-stretch="condensed">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when requested stretch is at lower bound"
+    );
+}
+
+#[test]
+fn existing_font_face_stretch_range_matches_upper_bound() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StretchRangeUpper';
+        font-style: normal;
+        font-stretch: condensed expanded;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StretchRangeUpper'" font-stretch="expanded">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when requested stretch is at upper bound"
+    );
+}
+
+#[test]
+fn existing_font_face_stretch_range_outside_does_not_match() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StretchRangeOutside';
+        font-style: normal;
+        font-stretch: condensed normal;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StretchRangeOutside'" font-stretch="expanded">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed by using resolver for out-of-range stretch");
+
+    assert!(output.contains("@font-face"));
+    assert!(
+        *calls.lock().expect("call counter mutex poisoned") >= 1,
+        "resolver should be called when requested stretch is outside existing range"
+    );
+}
+
+#[test]
+fn existing_font_face_stretch_descending_range_errors() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StretchRangeDescending';
+        font-style: normal;
+        font-stretch: expanded condensed;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StretchRangeDescending'" font-stretch="normal">A</text>
+</svg>"#
+    );
+
+    let err = embed_svg_fonts(&svg, |_query| Ok(fixture_font_path("font-b.ttf")))
+        .expect_err("descending @font-face stretch range should fail");
+    assert!(
+        err.contains("stretch") || err.contains("range") || err.contains("descending"),
+        "expected stretch range-order validation error, got: {err}"
+    );
+}
+
+#[test]
+fn existing_font_face_stretch_overlapping_ranges_match_without_resolver() {
+    let data_url_a = fixture_data_url("font-a.ttf");
+    let data_url_b = fixture_data_url("font-b.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="90">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StretchOverlap';
+        font-style: normal;
+        font-stretch: condensed normal;
+        src: url({data_url_a}) format('truetype');
+      }}
+      @font-face {{
+        font-family: 'StretchOverlap';
+        font-style: normal;
+        font-stretch: normal expanded;
+        src: url({data_url_b}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StretchOverlap'" font-stretch="normal">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-c.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when at least one overlap stretch range includes requested stretch"
+    );
+}
+
+#[test]
+fn existing_font_face_stretch_single_value_stays_exact_match() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StretchSingleExact';
+        font-style: normal;
+        font-stretch: condensed;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StretchSingleExact'" font-stretch="normal">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed by using resolver for non-matching single stretch");
+
+    assert!(output.contains("@font-face"));
+    assert!(
+        *calls.lock().expect("call counter mutex poisoned") >= 1,
+        "resolver should be called when query does not exactly match single descriptor stretch"
+    );
+}
+
+#[test]
+fn existing_font_face_missing_stretch_defaults_to_normal() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'MissingStretch';
+        font-style: normal;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'MissingStretch'">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when missing descriptor defaults to normal and query is normal"
+    );
+}
+
+#[test]
+fn existing_font_face_style_oblique_range_matches_default_angle() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StyleObliqueRangeMatch';
+        font-style: oblique 10deg 20deg;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StyleObliqueRangeMatch'" font-style="oblique">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let _output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed");
+
+    assert_eq!(
+        *calls.lock().expect("call counter mutex poisoned"),
+        0,
+        "resolver should not be called when oblique range includes default 14deg"
+    );
+}
+
+#[test]
+fn existing_font_face_style_oblique_range_outside_default_angle_does_not_match() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StyleObliqueRangeMiss';
+        font-style: oblique 20deg 30deg;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StyleObliqueRangeMiss'" font-style="oblique">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed by using resolver for unmatched oblique angle");
+
+    assert!(output.contains("@font-face"));
+    assert!(
+        *calls.lock().expect("call counter mutex poisoned") >= 1,
+        "resolver should be called when oblique range does not include default 14deg"
+    );
+}
+
+#[test]
+fn existing_font_face_style_descending_oblique_range_errors() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StyleObliqueDescending';
+        font-style: oblique 20deg 10deg;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StyleObliqueDescending'" font-style="oblique">A</text>
+</svg>"#
+    );
+
+    let err = embed_svg_fonts(&svg, |_query| Ok(fixture_font_path("font-b.ttf")))
+        .expect_err("descending @font-face oblique range should fail");
+    assert!(
+        err.contains("font-style") || err.contains("oblique") || err.contains("descending"),
+        "expected oblique style range-order validation error, got: {err}"
+    );
+}
+
+#[test]
+fn existing_font_face_style_italic_does_not_match_oblique() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StyleStrictItalic';
+        font-style: italic;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StyleStrictItalic'" font-style="oblique">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed by using resolver for strict style mismatch");
+
+    assert!(output.contains("@font-face"));
+    assert!(
+        *calls.lock().expect("call counter mutex poisoned") >= 1,
+        "resolver should be called when italic face does not match oblique request"
+    );
+}
+
+#[test]
+fn existing_font_face_style_oblique_does_not_match_normal() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'StyleStrictOblique';
+        font-style: oblique 10deg 20deg;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'StyleStrictOblique'">A</text>
+</svg>"#
+    );
+
+    let calls = Arc::new(Mutex::new(0usize));
+    let calls_for_resolver = Arc::clone(&calls);
+    let output = embed_svg_fonts(&svg, move |_query| {
+        let mut guard = calls_for_resolver
+            .lock()
+            .expect("call counter mutex poisoned");
+        *guard += 1;
+        Ok(fixture_font_path("font-b.ttf"))
+    })
+    .expect("embedding should succeed by using resolver for strict style mismatch");
+
+    assert!(output.contains("@font-face"));
+    assert!(
+        *calls.lock().expect("call counter mutex poisoned") >= 1,
+        "resolver should be called when oblique face does not match normal request"
+    );
+}
+
+#[test]
 fn style_with_font_face_and_other_rules_preserves_non_font_rules() {
     let data_url = fixture_data_url("font-a.ttf");
     let svg = format!(

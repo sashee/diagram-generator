@@ -6,10 +6,13 @@ use tempfile::TempDir;
 
 use base64::Engine;
 use lightningcss::printer::PrinterOptions;
-use lightningcss::rules::font_face::{FontFaceProperty, FontFaceRule, Source};
+use lightningcss::properties::font::{AbsoluteFontWeight, FontStretch, FontWeight};
+use lightningcss::rules::font_face::{FontFaceProperty, FontFaceRule, FontStyle, Source};
 use lightningcss::rules::{CssRule, CssRuleList};
 use lightningcss::stylesheet::{ParserOptions, StyleSheet};
 use lightningcss::traits::ToCss;
+use lightningcss::values::angle::Angle;
+use lightningcss::values::size::Size2D;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FontQuery {
@@ -36,20 +39,85 @@ struct ResolveDebug {
 #[derive(Clone, Debug)]
 struct ExistingFace {
     family: String,
-    style_css: String,
-    weight: u16,
-    stretch_css: String,
+    style: StyleRange,
+    weight: WeightRange,
+    stretch: StretchRange,
     data_url: String,
     unicode_range: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StyleRange {
+    Normal,
+    Italic,
+    ObliqueRange { min_deg: f32, max_deg: f32 },
+}
+
+impl StyleRange {
+    fn matches(self, query: QueryStyle) -> bool {
+        match (self, query) {
+            (StyleRange::Normal, QueryStyle::Normal) => true,
+            (StyleRange::Italic, QueryStyle::Italic) => true,
+            (StyleRange::ObliqueRange { min_deg, max_deg }, QueryStyle::Oblique { deg }) => {
+                min_deg <= deg && deg <= max_deg
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum QueryStyle {
+    Normal,
+    Italic,
+    Oblique { deg: f32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WeightRange {
+    min: u16,
+    max: u16,
+}
+
+impl WeightRange {
+    fn exact(value: u16) -> Self {
+        Self {
+            min: value,
+            max: value,
+        }
+    }
+
+    fn includes(self, value: u16) -> bool {
+        self.min <= value && value <= self.max
+    }
 }
 
 #[derive(Clone, Debug)]
 struct ExistingLoadedFace {
     family: String,
-    style_css: String,
-    weight: u16,
-    stretch_css: String,
+    style: StyleRange,
+    weight: WeightRange,
+    stretch: StretchRange,
     runtime_path: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StretchRange {
+    min: f32,
+    max: f32,
+}
+
+impl StretchRange {
+    fn exact(value: f32) -> Self {
+        Self {
+            min: value,
+            max: value,
+        }
+    }
+
+    fn includes(self, value: f32) -> bool {
+        self.min <= value && value <= self.max
+    }
 }
 
 #[cfg(test)]
@@ -133,8 +201,326 @@ fn normalize_css_string_value(value: &str) -> String {
     unquoted.trim().to_string()
 }
 
-fn parse_weight(value: &str) -> u16 {
-    value.trim().parse::<u16>().ok().unwrap_or(400)
+fn parse_absolute_weight(value: &AbsoluteFontWeight) -> u16 {
+    match value {
+        AbsoluteFontWeight::Weight(weight) => *weight as u16,
+        AbsoluteFontWeight::Normal => 400,
+        AbsoluteFontWeight::Bold => 700,
+    }
+}
+
+fn parse_weight(value: &Size2D<FontWeight>) -> Result<WeightRange, String> {
+    if matches!(value.0, FontWeight::Bolder | FontWeight::Lighter)
+        || matches!(value.1, FontWeight::Bolder | FontWeight::Lighter)
+    {
+        return Err(
+            "existing @font-face has relative font-weight (bolder/lighter), which is not supported"
+                .to_string(),
+        );
+    }
+
+    let FontWeight::Absolute(first) = &value.0 else {
+        return Err(
+            "existing @font-face has relative font-weight (bolder/lighter), which is not supported"
+                .to_string(),
+        );
+    };
+
+    let FontWeight::Absolute(second) = &value.1 else {
+        return Err(
+            "existing @font-face has relative font-weight (bolder/lighter), which is not supported"
+                .to_string(),
+        );
+    };
+
+    let min = parse_absolute_weight(first);
+    let max = parse_absolute_weight(second);
+    if min > max {
+        return Err(format!(
+            "existing @font-face has descending font-weight range ({min} {max}), which is invalid"
+        ));
+    }
+
+    Ok(WeightRange { min, max })
+}
+
+fn parse_stretch_token(value: &str) -> Option<f32> {
+    let token = value.trim().to_ascii_lowercase();
+    match token.as_str() {
+        "ultra-condensed" => Some(50.0),
+        "extra-condensed" => Some(62.5),
+        "condensed" => Some(75.0),
+        "semi-condensed" => Some(87.5),
+        "normal" => Some(100.0),
+        "semi-expanded" => Some(112.5),
+        "expanded" => Some(125.0),
+        "extra-expanded" => Some(150.0),
+        "ultra-expanded" => Some(200.0),
+        _ => token.strip_suffix('%').and_then(|n| n.parse::<f32>().ok()),
+    }
+}
+
+fn parse_stretch_component(value: &FontStretch) -> Result<f32, String> {
+    let css = css_to_string(value)?;
+    parse_stretch_token(&css).ok_or_else(|| {
+        format!(
+            "existing @font-face has unsupported font-stretch value '{}': expected keyword or percentage",
+            css
+        )
+    })
+}
+
+fn parse_stretch(value: &Size2D<FontStretch>) -> Result<StretchRange, String> {
+    let min = parse_stretch_component(&value.0)?;
+    let max = parse_stretch_component(&value.1)?;
+    if min > max {
+        return Err(format!(
+            "existing @font-face has descending font-stretch range ({min}% {max}%), which is invalid"
+        ));
+    }
+    Ok(StretchRange { min, max })
+}
+
+fn parse_angle_token_to_degrees(value: &str) -> Option<f32> {
+    let token = value.trim().to_ascii_lowercase();
+    if let Some(raw) = token.strip_suffix("deg") {
+        return raw.trim().parse::<f32>().ok();
+    }
+    if let Some(raw) = token.strip_suffix("grad") {
+        return raw.trim().parse::<f32>().ok().map(|v| v * 0.9);
+    }
+    if let Some(raw) = token.strip_suffix("rad") {
+        return raw
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| v * (180.0 / std::f32::consts::PI));
+    }
+    if let Some(raw) = token.strip_suffix("turn") {
+        return raw.trim().parse::<f32>().ok().map(|v| v * 360.0);
+    }
+    None
+}
+
+fn parse_angle_to_degrees(value: &Angle) -> f32 {
+    value.to_degrees()
+}
+
+fn parse_style(value: &FontStyle) -> Result<StyleRange, String> {
+    match value {
+        FontStyle::Normal => Ok(StyleRange::Normal),
+        FontStyle::Italic => Ok(StyleRange::Italic),
+        FontStyle::Oblique(range) => {
+            let min_deg = parse_angle_to_degrees(&range.0);
+            let max_deg = parse_angle_to_degrees(&range.1);
+            if min_deg > max_deg {
+                return Err(format!(
+                    "existing @font-face has descending font-style oblique range ({min_deg}deg {max_deg}deg), which is invalid"
+                ));
+            }
+            Ok(StyleRange::ObliqueRange { min_deg, max_deg })
+        }
+    }
+}
+
+fn parse_absolute_weight_token(value: &str) -> Option<u16> {
+    let token = value.trim();
+    if token.eq_ignore_ascii_case("normal") {
+        return Some(400);
+    }
+    if token.eq_ignore_ascii_case("bold") {
+        return Some(700);
+    }
+    token
+        .parse::<u16>()
+        .ok()
+        .filter(|parsed| (1..=1000).contains(parsed))
+}
+
+fn validate_font_weight_declaration_value(value: &str) -> Result<(), String> {
+    let tokens = value
+        .split_whitespace()
+        .map(|token| token.trim_end_matches("!important"))
+        .filter(|token| !token.is_empty() && !token.eq_ignore_ascii_case("!important"))
+        .collect::<Vec<_>>();
+
+    if tokens.len() != 2 {
+        return Ok(());
+    }
+
+    let Some(min) = parse_absolute_weight_token(tokens[0]) else {
+        return Ok(());
+    };
+    let Some(max) = parse_absolute_weight_token(tokens[1]) else {
+        return Ok(());
+    };
+
+    if min > max {
+        return Err(format!(
+            "existing @font-face has descending font-weight range ({min} {max}), which is invalid"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_font_stretch_declaration_value(value: &str) -> Result<(), String> {
+    let tokens = value
+        .split_whitespace()
+        .map(|token| token.trim_end_matches("!important"))
+        .filter(|token| !token.is_empty() && !token.eq_ignore_ascii_case("!important"))
+        .collect::<Vec<_>>();
+
+    if tokens.len() != 2 {
+        return Ok(());
+    }
+
+    let Some(min) = parse_stretch_token(tokens[0]) else {
+        return Ok(());
+    };
+    let Some(max) = parse_stretch_token(tokens[1]) else {
+        return Ok(());
+    };
+
+    if min > max {
+        return Err(format!(
+            "existing @font-face has descending font-stretch range ({min}% {max}%), which is invalid"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_font_style_declaration_value(value: &str) -> Result<(), String> {
+    let tokens = value
+        .split_whitespace()
+        .map(|token| token.trim_end_matches("!important"))
+        .filter(|token| !token.is_empty() && !token.eq_ignore_ascii_case("!important"))
+        .collect::<Vec<_>>();
+
+    if tokens.len() < 3 {
+        return Ok(());
+    }
+    if !tokens[0].eq_ignore_ascii_case("oblique") {
+        return Ok(());
+    }
+
+    let Some(min) = parse_angle_token_to_degrees(tokens[1]) else {
+        return Ok(());
+    };
+    let Some(max) = parse_angle_token_to_degrees(tokens[2]) else {
+        return Ok(());
+    };
+
+    if min > max {
+        return Err(format!(
+            "existing @font-face has descending font-style oblique range ({min}deg {max}deg), which is invalid"
+        ));
+    }
+
+    Ok(())
+}
+
+fn find_declaration_terminator(fragment: &str) -> usize {
+    let mut quote: Option<u8> = None;
+    let mut paren_depth: usize = 0;
+    for (idx, b) in fragment.as_bytes().iter().copied().enumerate() {
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+            continue;
+        }
+        match b {
+            b'\'' | b'"' => quote = Some(b),
+            b'(' => paren_depth += 1,
+            b')' if paren_depth > 0 => paren_depth -= 1,
+            b';' if paren_depth == 0 => return idx,
+            _ => {}
+        }
+    }
+    fragment.len()
+}
+
+fn find_block_end(fragment: &str) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    let mut paren_depth: usize = 0;
+    let mut brace_depth: usize = 0;
+
+    for (idx, b) in fragment.as_bytes().iter().copied().enumerate() {
+        if let Some(q) = quote {
+            if b == q {
+                quote = None;
+            }
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' => quote = Some(b),
+            b'(' => paren_depth += 1,
+            b')' if paren_depth > 0 => paren_depth -= 1,
+            b'{' if paren_depth == 0 => brace_depth += 1,
+            b'}' if paren_depth == 0 && brace_depth > 0 => {
+                brace_depth -= 1;
+                if brace_depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn validate_font_face_block_weight_ranges(block: &str) -> Result<(), String> {
+    let mut cursor = 0usize;
+    while cursor < block.len() {
+        let decl = &block[cursor..];
+        let end = find_declaration_terminator(decl);
+        let declaration = decl[..end].trim();
+
+        if let Some((name, value)) = declaration.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("font-weight") {
+                validate_font_weight_declaration_value(value.trim())?;
+            }
+            if name.trim().eq_ignore_ascii_case("font-stretch") {
+                validate_font_stretch_declaration_value(value.trim())?;
+            }
+            if name.trim().eq_ignore_ascii_case("font-style") {
+                validate_font_style_declaration_value(value.trim())?;
+            }
+        }
+
+        if end == decl.len() {
+            break;
+        }
+        cursor += end + 1;
+    }
+    Ok(())
+}
+
+fn validate_font_face_weight_ranges(css_input: &str) -> Result<(), String> {
+    let lowered = css_input.to_ascii_lowercase();
+    let mut cursor = 0usize;
+
+    while let Some(rel_at) = lowered[cursor..].find("@font-face") {
+        let at = cursor + rel_at;
+        let Some(rel_open) = lowered[at..].find('{') else {
+            break;
+        };
+        let open = at + rel_open;
+        let fragment = &css_input[open..];
+        let close = find_block_end(fragment).ok_or_else(|| {
+            "unterminated @font-face block while validating font-weight".to_string()
+        })?;
+
+        let block = &css_input[open + 1..open + close];
+        validate_font_face_block_weight_ranges(block)?;
+        cursor = open + close + 1;
+    }
+
+    Ok(())
 }
 
 fn css_to_string<T: ToCss>(value: &T) -> Result<String, String> {
@@ -145,9 +531,9 @@ fn css_to_string<T: ToCss>(value: &T) -> Result<String, String> {
 
 fn parse_existing_face_rule(rule: &FontFaceRule<'_>) -> Result<Option<ExistingFace>, String> {
     let mut family: Option<String> = None;
-    let mut style_css = "normal".to_string();
-    let mut weight = 400u16;
-    let mut stretch_css = "normal".to_string();
+    let mut style = StyleRange::Normal;
+    let mut weight = WeightRange::exact(400);
+    let mut stretch = StretchRange::exact(100.0);
     let mut data_url: Option<String> = None;
     let mut unicode_range: Option<String> = None;
 
@@ -170,14 +556,13 @@ fn parse_existing_face_rule(rule: &FontFaceRule<'_>) -> Result<Option<ExistingFa
                 family = Some(normalize_css_string_value(&value));
             }
             FontFaceProperty::FontStyle(font_style) => {
-                style_css = css_to_string(font_style)?.to_ascii_lowercase();
+                style = parse_style(font_style)?;
             }
             FontFaceProperty::FontWeight(font_weight) => {
-                let value = css_to_string(font_weight)?;
-                weight = parse_weight(&value);
+                weight = parse_weight(font_weight)?;
             }
             FontFaceProperty::FontStretch(font_stretch) => {
-                stretch_css = css_to_string(font_stretch)?.to_ascii_lowercase();
+                stretch = parse_stretch(font_stretch)?;
             }
             FontFaceProperty::UnicodeRange(ranges) => {
                 unicode_range = Some(css_to_string(ranges)?);
@@ -198,9 +583,9 @@ fn parse_existing_face_rule(rule: &FontFaceRule<'_>) -> Result<Option<ExistingFa
 
     Ok(Some(ExistingFace {
         family,
-        style_css,
+        style,
         weight,
-        stretch_css,
+        stretch,
         data_url,
         unicode_range,
     }))
@@ -227,6 +612,8 @@ fn collect_existing_faces_from_style_css(
         } else {
             (style_css, false, String::new(), String::new())
         };
+
+    validate_font_face_weight_ranges(css_input)?;
 
     let mut stylesheet = StyleSheet::parse(css_input, ParserOptions::default())
         .map_err(|e| format!("failed to parse <style> CSS: {e}"))?;
@@ -495,16 +882,16 @@ fn match_existing_face_paths(
     query: &FontQuery,
     existing_faces: &[ExistingLoadedFace],
 ) -> Vec<PathBuf> {
-    let style_css = style_to_css(&query.style);
-    let stretch_css = stretch_to_css(&query.stretch);
+    let style = parse_query_style(&query.style);
+    let stretch = stretch_to_percent(&query.stretch);
     let mut paths = Vec::new();
 
     for family in &query.families {
         for face in existing_faces.iter().filter(|face| {
             face.family == *family
-                && face.style_css == style_css
-                && face.weight == query.weight
-                && face.stretch_css == stretch_css
+                && face.style.matches(style)
+                && face.weight.includes(query.weight)
+                && face.stretch.includes(stretch)
         }) {
             paths.push(face.runtime_path.clone());
         }
@@ -588,6 +975,14 @@ fn style_to_css(style: &str) -> &'static str {
     }
 }
 
+fn parse_query_style(style: &str) -> QueryStyle {
+    match style {
+        "Italic" => QueryStyle::Italic,
+        "Oblique" => QueryStyle::Oblique { deg: 14.0 },
+        _ => QueryStyle::Normal,
+    }
+}
+
 fn stretch_to_css(stretch: &str) -> &'static str {
     match stretch {
         "UltraCondensed" => "ultra-condensed",
@@ -599,6 +994,20 @@ fn stretch_to_css(stretch: &str) -> &'static str {
         "ExtraExpanded" => "extra-expanded",
         "UltraExpanded" => "ultra-expanded",
         _ => "normal",
+    }
+}
+
+fn stretch_to_percent(stretch: &str) -> f32 {
+    match stretch {
+        "UltraCondensed" => 50.0,
+        "ExtraCondensed" => 62.5,
+        "Condensed" => 75.0,
+        "SemiCondensed" => 87.5,
+        "SemiExpanded" => 112.5,
+        "Expanded" => 125.0,
+        "ExtraExpanded" => 150.0,
+        "UltraExpanded" => 200.0,
+        _ => 100.0,
     }
 }
 
@@ -885,9 +1294,9 @@ where
         runtime_to_emit.insert(runtime_path.clone(), emit_path.clone());
         loaded_existing_faces.push(ExistingLoadedFace {
             family: face.family.clone(),
-            style_css: face.style_css.clone(),
+            style: face.style,
             weight: face.weight,
-            stretch_css: face.stretch_css.clone(),
+            stretch: face.stretch,
             runtime_path,
         });
     }
@@ -1250,9 +1659,9 @@ pub fn parse_svg_tree_inline_fonts_only(input_svg: &str) -> Result<usvg::Tree, S
 
         loaded_existing_faces.push(ExistingLoadedFace {
             family: face.family.clone(),
-            style_css: face.style_css.clone(),
+            style: face.style,
             weight: face.weight,
-            stretch_css: face.stretch_css.clone(),
+            stretch: face.stretch,
             runtime_path,
         });
     }
