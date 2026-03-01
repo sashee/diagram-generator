@@ -1326,8 +1326,21 @@ where
         Arc::new(Mutex::new(BTreeMap::new()));
     let face_query_context_for_select_font = Arc::clone(&face_query_context);
     let face_query_context_for_select_fallback = Arc::clone(&face_query_context);
+    let image_resolver_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let image_resolver_error_for_resolve_string = Arc::clone(&image_resolver_error);
 
     let mut options = usvg::Options::default();
+    options.image_href_resolver = usvg::ImageHrefResolver {
+        resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+        resolve_string: Box::new(move |href, _opts| {
+            if let Ok(mut slot) = image_resolver_error_for_resolve_string.lock() {
+                if slot.is_none() {
+                    *slot = Some(format!("external image resource is not allowed: {href}"));
+                }
+            }
+            None
+        }),
+    };
     options.font_resolver = usvg::FontResolver {
         select_font: Box::new(move |font, db| {
             let query = font_spec_to_query(font, None);
@@ -1679,8 +1692,21 @@ pub fn parse_svg_tree_inline_fonts_only(input_svg: &str) -> Result<usvg::Tree, S
         Arc::new(Mutex::new(BTreeMap::new()));
     let face_query_context_for_select_font = Arc::clone(&face_query_context);
     let face_query_context_for_select_fallback = Arc::clone(&face_query_context);
+    let image_resolver_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let image_resolver_error_for_resolve_string = Arc::clone(&image_resolver_error);
 
     let mut options = usvg::Options::default();
+    options.image_href_resolver = usvg::ImageHrefResolver {
+        resolve_data: usvg::ImageHrefResolver::default_data_resolver(),
+        resolve_string: Box::new(move |href, _opts| {
+            if let Ok(mut slot) = image_resolver_error_for_resolve_string.lock() {
+                if slot.is_none() {
+                    *slot = Some(format!("external image resource is not allowed: {href}"));
+                }
+            }
+            None
+        }),
+    };
     options.font_resolver = usvg::FontResolver {
         select_font: Box::new(move |font, db| {
             let query = font_spec_to_query(font, None);
@@ -1779,6 +1805,12 @@ pub fn parse_svg_tree_inline_fonts_only(input_svg: &str) -> Result<usvg::Tree, S
 
     let tree = usvg::Tree::from_data(stripped_svg.as_bytes(), &options)
         .map_err(|e| format!("failed to parse SVG: {e}"))?;
+
+    if let Ok(slot) = image_resolver_error.lock() {
+        if let Some(err) = slot.as_ref() {
+            return Err(err.clone());
+        }
+    }
 
     if let Ok(slot) = resolver_error.lock() {
         if let Some(err) = slot.as_ref() {
@@ -1883,5 +1915,31 @@ mod tests {
         assert!(families
             .iter()
             .any(|f| f.contains(&"sans-serif".to_string())));
+    }
+
+    #[test]
+    fn parse_svg_tree_rejects_external_image_href_url() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><image href="https://example.com/a.png" width="2" height="2"/></svg>"#;
+        let err =
+            parse_svg_tree_inline_fonts_only(svg).expect_err("external image href should fail");
+        assert!(err.contains("external image resource is not allowed"));
+    }
+
+    #[test]
+    fn parse_svg_tree_rejects_external_image_href_path() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><image href="a.png" width="2" height="2"/></svg>"#;
+        let err = parse_svg_tree_inline_fonts_only(svg).expect_err("file image href should fail");
+        assert!(err.contains("external image resource is not allowed"));
+    }
+
+    #[test]
+    fn parse_svg_tree_allows_data_url_image_href() {
+        let one_px =
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a0cAAAAASUVORK5CYII=";
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1\" height=\"1\"><image href=\"data:image/png;base64,{one_px}\" width=\"1\" height=\"1\"/></svg>"
+        );
+
+        parse_svg_tree_inline_fonts_only(&svg).expect("data URL image href should be allowed");
     }
 }

@@ -130,7 +130,7 @@ fn allows_internal_fragment_refs() {
 }
 
 #[test]
-fn rejects_css_external_url_and_import() {
+fn allows_css_external_url_and_import_syntax() {
     let with_external_url = r#"
 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
   <style><![CDATA[
@@ -148,20 +148,20 @@ fn rejects_css_external_url_and_import() {
 </svg>
 "#;
 
-    let err = render(with_external_url, 1.0).expect_err("external CSS URL should fail");
-    assert!(!err.is_empty());
-    let err = render(with_import, 1.0).expect_err("@import should fail");
-    assert!(!err.is_empty());
+    let out = render(with_external_url, 1.0).expect("external CSS URL syntax should parse");
+    assert_eq!(&out[0..8], b"\x89PNG\r\n\x1a\n");
+    let out = render(with_import, 1.0).expect("@import syntax should parse");
+    assert_eq!(&out[0..8], b"\x89PNG\r\n\x1a\n");
 }
 
 #[test]
-fn rejects_xml_stylesheet_processing_instruction() {
+fn allows_xml_stylesheet_processing_instruction_syntax() {
     let svg = r#"<?xml version="1.0"?>
 <?xml-stylesheet type="text/css" href="https://example.com/style.css"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>"#;
 
-    let err = render(svg, 1.0).expect_err("xml stylesheet PI should fail");
-    assert!(!err.is_empty());
+    let out = render(svg, 1.0).expect("xml stylesheet PI syntax should parse");
+    assert_eq!(&out[0..8], b"\x89PNG\r\n\x1a\n");
 }
 
 #[test]
