@@ -3,6 +3,10 @@ name = "sandbox-run"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "sandbox-run-worker"
+path = "src/worker.rs"
+
 [dependencies]
 caps = "0.5"
 landlock = "0.4"
