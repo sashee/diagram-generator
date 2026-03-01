@@ -1,4 +1,6 @@
 use std::env;
+use std::error::Error;
+use std::io::ErrorKind;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
@@ -15,6 +17,23 @@ const NIX_STORE_DIR: &str = env!("NIX_STORE_DIR");
 fn fail(msg: impl AsRef<str>) -> ! {
     eprintln!("{}", msg.as_ref());
     process::exit(1);
+}
+
+fn is_operation_not_permitted_error(err: &(dyn Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(e) = current {
+        if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
+            if io_err.kind() == ErrorKind::PermissionDenied || io_err.raw_os_error() == Some(1) {
+                return true;
+            }
+        }
+        let message = e.to_string();
+        if message.contains("Operation not permitted") || message.contains("os error 1") {
+            return true;
+        }
+        current = e.source();
+    }
+    false
 }
 
 fn parse_command() -> (String, Vec<String>) {
@@ -57,7 +76,7 @@ fn harden_process_privileges() -> Result<(), String> {
     for capability in caps::all() {
         if caps::has_cap(None, CapSet::Bounding, capability).unwrap_or(false) {
             if let Err(err) = caps::drop(None, CapSet::Bounding, capability) {
-                if !err.to_string().contains("Operation not permitted") {
+                if !is_operation_not_permitted_error(&err) {
                     return Err(format!(
                         "failed to drop capability '{capability:?}' from bounding set: {err}"
                     ));

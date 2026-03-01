@@ -12,7 +12,7 @@ pkgs.rustPlatform.buildRustPackage {
     lockFile = ./src/sandbox-run/Cargo.lock;
   };
 
-  nativeBuildInputs = [ pkgs.pkg-config ];
+  nativeBuildInputs = [ pkgs.pkg-config pkgs.coreutils ];
   buildInputs = [ pkgs.libseccomp ];
 
   NIX_STORE_DIR = builtins.storeDir;
