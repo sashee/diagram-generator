@@ -32,22 +32,35 @@ let
     value = mkTestDerivation file;
   }) testFiles);
 
-  allTests = pkgs.linkFarm "diagram-generator-tests" (
-    (map (testName: {
-      name = testName;
-      path = testDerivationsByName.${testName};
-    }) testNames)
-    ++ [
-      {
-        name = "svg-font-inliner";
-        path = packages.svg_font_inliner;
-      }
-      {
-        name = "svg-to-png";
-        path = packages.svg_to_png;
-      }
-    ]
-  );
+  allTests = let
+    testsLinkFarm = pkgs.linkFarm "diagram-generator-tests" (
+      (map (testName: {
+        name = testName;
+        path = testDerivationsByName.${testName};
+      }) testNames)
+      ++ [
+        {
+          name = "svg-font-inliner";
+          path = packages.svg_font_inliner;
+        }
+        {
+          name = "svg-to-png";
+          path = packages.svg_to_png;
+        }
+      ]
+    );
+  in
+    pkgs.runCommand "diagram-generator-tests-with-index" {
+      nativeBuildInputs = [ pkgs.bash ];
+    } ''
+      mkdir -p "$out"
+      cp -r ${testsLinkFarm}/* "$out/"
+      chmod -R u+w "$out"
+
+      cp "${./tests/generate-central-index.sh}" "$out/generate-index.sh"
+      chmod +x "$out/generate-index.sh"
+      "${pkgs.bash}/bin/bash" "$out/generate-index.sh" "$out"
+    '';
 
   shell = pkgs.mkShell {
     nativeBuildInputs = [
