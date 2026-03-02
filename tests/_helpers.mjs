@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import child_process from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -9,6 +10,10 @@ assert(diagramGeneratorBin, "DIAGRAM_GENERATOR_BIN is required");
 
 export const svgToPngBin = process.env.SVG_TO_PNG_BIN;
 export const svgFontInlinerBin = process.env.SVG_FONT_INLINER_BIN;
+export const diagramGeneratorBinA = process.env.DIAGRAM_GENERATOR_BIN_A;
+export const diagramGeneratorBinB = process.env.DIAGRAM_GENERATOR_BIN_B;
+export const svgFontInlinerBinA = process.env.SVG_FONT_INLINER_BIN_A;
+export const svgFontInlinerBinB = process.env.SVG_FONT_INLINER_BIN_B;
 
 const testOutDir = process.env.TEST_OUT_DIR;
 assert(testOutDir, "TEST_OUT_DIR is required");
@@ -30,8 +35,8 @@ export const writeBytesArtifact = async (name, bytes) => {
   return filePath;
 };
 
-export const runCli = async ({ args = [], stdin = "" } = {}) => {
-  const child = child_process.spawn(diagramGeneratorBin, args, {
+const runTextBin = async ({ bin, args = [], stdin = "" }) => {
+  const child = child_process.spawn(bin, args, {
     stdio: ["pipe", "pipe", "pipe"],
   });
 
@@ -58,6 +63,17 @@ export const runCli = async ({ args = [], stdin = "" } = {}) => {
     stdout: Buffer.concat(stdoutChunks).toString("utf8"),
     stderr: Buffer.concat(stderrChunks).toString("utf8"),
   };
+};
+
+export const runCli = async ({ args = [], stdin = "" } = {}) => runTextBin({
+  bin: diagramGeneratorBin,
+  args,
+  stdin,
+});
+
+export const runCliWithBin = async ({ bin, args = [], stdin = "" } = {}) => {
+  assert(bin, "runCliWithBin requires bin");
+  return runTextBin({ bin, args, stdin });
 };
 
 export const runSvgToPng = async ({ args = [], stdin = "" } = {}) => {
@@ -94,34 +110,12 @@ export const runSvgToPng = async ({ args = [], stdin = "" } = {}) => {
 
 export const runSvgFontInliner = async ({ args = [], stdin = "" } = {}) => {
   assert(svgFontInlinerBin, "SVG_FONT_INLINER_BIN is required");
+  return runTextBin({ bin: svgFontInlinerBin, args, stdin });
+};
 
-  const child = child_process.spawn(svgFontInlinerBin, args, {
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-
-  const stdoutChunks = [];
-  const stderrChunks = [];
-  child.stdout.on("data", (chunk) => stdoutChunks.push(chunk));
-  child.stderr.on("data", (chunk) => stderrChunks.push(chunk));
-
-  child.stdin.on("error", (err) => {
-    if (err.code !== "EPIPE") {
-      throw err;
-    }
-  });
-  child.stdin.end(stdin);
-
-  const { code, signal } = await new Promise((resolve, reject) => {
-    child.on("error", reject);
-    child.on("close", (statusCode, statusSignal) => resolve({ code: statusCode, signal: statusSignal }));
-  });
-
-  return {
-    code,
-    signal,
-    stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-    stderr: Buffer.concat(stderrChunks).toString("utf8"),
-  };
+export const runSvgFontInlinerWithBin = async ({ bin, args = [], stdin = "" } = {}) => {
+  assert(bin, "runSvgFontInlinerWithBin requires bin");
+  return runTextBin({ bin, args, stdin });
 };
 
 export const assertSuccess = (res) => {
@@ -148,6 +142,23 @@ export const listRenderers = async () => {
   const res = await runCli({ args: ["--list-available-renderers"] });
   assertSuccess(res);
   return parseJson(res.stdout);
+};
+
+export const listRenderersWithBin = async (bin) => {
+  const res = await runCliWithBin({ bin, args: ["--list-available-renderers"] });
+  assertSuccess(res);
+  return parseJson(res.stdout);
+};
+
+export const embeddedFontHashes = (svg) => {
+  const hashes = [];
+  const re = /url\((?:"|')?data:[^;]+;base64,([^)'"\s]+)(?:"|')?\)/g;
+  for (const match of svg.matchAll(re)) {
+    const bytes = Buffer.from(match[1], "base64");
+    const hash = crypto.createHash("sha256").update(bytes).digest("hex");
+    hashes.push(hash);
+  }
+  return hashes.sort();
 };
 
 export const pickPlantumlRenderer = async () => {

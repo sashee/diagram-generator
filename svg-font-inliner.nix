@@ -1,5 +1,6 @@
 {
   debug,
+  fontconfig,
   pkgs,
 }:
 let
@@ -22,6 +23,7 @@ pkgs.rustPlatform.buildRustPackage {
   };
 
   preCheck = ''
+    export FONTCONFIG_FILE=${fontconfig}
     export PYFTSUBSET_BIN=${pkgs.python3Packages.fonttools}/bin/pyftsubset
     export PATH=${pkgs.lib.makeBinPath [pkgs.fontconfig pkgs.python3Packages.fonttools]}:$PATH
   '';
@@ -33,6 +35,7 @@ pkgs.rustPlatform.buildRustPackage {
       --add-flags -- \
       --add-flags $out/bin/.svg-font-inliner-real \
       --set SVG_FONT_EMBED_DEBUG ${if debug then "1" else "0"} \
+      --set FONTCONFIG_FILE ${fontconfig} \
       --set PYFTSUBSET_BIN ${pkgs.python3Packages.fonttools}/bin/pyftsubset \
       --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.fontconfig pkgs.python3Packages.fonttools]}
   '';

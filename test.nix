@@ -2,7 +2,19 @@ let
   nixpkgs = fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.11";
   pkgs = import nixpkgs { config = {}; overlays = []; };
   fontconfig = import ./tests/default-fontconfig.nix { inherit pkgs; };
+  fontconfigProfileA = import ./tests/fontconfig-profile-a.nix { inherit pkgs; };
+  fontconfigProfileB = import ./tests/fontconfig-profile-b.nix { inherit pkgs; };
   packages = import ./default.nix { debug = false; inherit pkgs fontconfig; };
+  packagesFontconfigA = import ./default.nix {
+    debug = false;
+    inherit pkgs;
+    fontconfig = fontconfigProfileA;
+  };
+  packagesFontconfigB = import ./default.nix {
+    debug = false;
+    inherit pkgs;
+    fontconfig = fontconfigProfileB;
+  };
 
   testFiles = builtins.sort (a: b: a < b) (builtins.filter
     (name: pkgs.lib.hasSuffix ".test.mjs" name)
@@ -23,7 +35,7 @@ let
     } ''
       set -euo pipefail
       mkdir -p "$out"
-      TEST_OUT_DIR="$out" DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator" SVG_TO_PNG_BIN="${packages.svg_to_png}/bin/svg-to-png" SVG_FONT_INLINER_BIN="${packages.svg_font_inliner}/bin/svg-font-inliner" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "${testsDir}/${file}"
+      TEST_OUT_DIR="$out" DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_A="${packagesFontconfigA.bin}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_B="${packagesFontconfigB.bin}/bin/diagram-generator" SVG_TO_PNG_BIN="${packages.svg_to_png}/bin/svg-to-png" SVG_FONT_INLINER_BIN="${packages.svg_font_inliner}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_A="${packagesFontconfigA.svg_font_inliner}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_B="${packagesFontconfigB.svg_font_inliner}/bin/svg-font-inliner" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "${testsDir}/${file}"
     '';
 
   testNames = map (file: pkgs.lib.removeSuffix ".test.mjs" file) testFiles;
@@ -72,8 +84,12 @@ let
     ];
     shellHook = ''
       export DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator"
+      export DIAGRAM_GENERATOR_BIN_A="${packagesFontconfigA.bin}/bin/diagram-generator"
+      export DIAGRAM_GENERATOR_BIN_B="${packagesFontconfigB.bin}/bin/diagram-generator"
       export SVG_TO_PNG_BIN="${packages.svg_to_png}/bin/svg-to-png"
       export SVG_FONT_INLINER_BIN="${packages.svg_font_inliner}/bin/svg-font-inliner"
+      export SVG_FONT_INLINER_BIN_A="${packagesFontconfigA.svg_font_inliner}/bin/svg-font-inliner"
+      export SVG_FONT_INLINER_BIN_B="${packagesFontconfigB.svg_font_inliner}/bin/svg-font-inliner"
       export SUPPORTED_VERSIONS_JSON="${./supported-versions.json}"
       export PYFTSUBSET_BIN="${pkgs.python3Packages.fonttools}/bin/pyftsubset"
       export DG_TEST_TMP="$(mktemp -d "''${TMPDIR:-/tmp}/diagram-generator-tests.XXXXXX")"
@@ -101,15 +117,19 @@ let
         mkdir -p "$test_out_dir"
 
         echo "running $test_file"
-        TEST_OUT_DIR="$test_out_dir" DIAGRAM_GENERATOR_BIN="$DIAGRAM_GENERATOR_BIN" SUPPORTED_VERSIONS_JSON="$SUPPORTED_VERSIONS_JSON" node "$test_file"
+        TEST_OUT_DIR="$test_out_dir" DIAGRAM_GENERATOR_BIN="$DIAGRAM_GENERATOR_BIN" DIAGRAM_GENERATOR_BIN_A="$DIAGRAM_GENERATOR_BIN_A" DIAGRAM_GENERATOR_BIN_B="$DIAGRAM_GENERATOR_BIN_B" SVG_TO_PNG_BIN="$SVG_TO_PNG_BIN" SVG_FONT_INLINER_BIN="$SVG_FONT_INLINER_BIN" SVG_FONT_INLINER_BIN_A="$SVG_FONT_INLINER_BIN_A" SVG_FONT_INLINER_BIN_B="$SVG_FONT_INLINER_BIN_B" SUPPORTED_VERSIONS_JSON="$SUPPORTED_VERSIONS_JSON" node "$test_file"
         status="$?"
         echo "output dir: $test_out_dir"
         return "$status"
       }
 
       echo "DIAGRAM_GENERATOR_BIN=$DIAGRAM_GENERATOR_BIN"
+      echo "DIAGRAM_GENERATOR_BIN_A=$DIAGRAM_GENERATOR_BIN_A"
+      echo "DIAGRAM_GENERATOR_BIN_B=$DIAGRAM_GENERATOR_BIN_B"
       echo "SVG_TO_PNG_BIN=$SVG_TO_PNG_BIN"
       echo "SVG_FONT_INLINER_BIN=$SVG_FONT_INLINER_BIN"
+      echo "SVG_FONT_INLINER_BIN_A=$SVG_FONT_INLINER_BIN_A"
+      echo "SVG_FONT_INLINER_BIN_B=$SVG_FONT_INLINER_BIN_B"
       echo "SUPPORTED_VERSIONS_JSON=$SUPPORTED_VERSIONS_JSON"
       echo "PYFTSUBSET_BIN=$PYFTSUBSET_BIN"
       echo "DG_TEST_TMP=$DG_TEST_TMP"

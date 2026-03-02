@@ -9,7 +9,7 @@
 let
 	sandbox_run = import ./sandbox-run.nix { inherit debug pkgs; };
 	svg_font_inliner = import ./svg-font-inliner.nix {
-		inherit debug pkgs;
+		inherit debug fontconfig pkgs;
 	};
 	svg_to_png = import ./svg-to-png.nix {
 		inherit debug pkgs;
