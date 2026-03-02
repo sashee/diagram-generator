@@ -1,11 +1,14 @@
+let
+	plantuml_1_2025_4 = import ../plantuml/v1.2025.4.nix;
+	recharts_2_15_4 = import ../recharts/2.15.4.nix;
+in
 {
 	bin = {
 		version,
 	}:
 	let
-		pkgs = import (fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.05") {};
-		wrapper = (import ../recharts/2.15.4.nix).makewrapper {
-			pkgs = pkgs;
+		wrapper = recharts_2_15_4.makewrapper {
+			pkgs = plantuml_1_2025_4.pkgs;
 			packageDir = ./0.21.0;
 			wrapperScript = ./0.21.0/index.ts;
 		};

@@ -1,4 +1,7 @@
 let
+	plantuml_1_2025_4 = import ../plantuml/v1.2025.4.nix;
+	pkgs = plantuml_1_2025_4.pkgs;
+
 	makewrapper = {pkgs, packageDir, wrapperScript}:
 	let
 		packageJson = pkgs.lib.importJSON (pkgs.lib.path.append packageDir "package.json");
@@ -51,13 +54,11 @@ in
 {
 	makewrapper = makewrapper;
 	bin = {version}: let
-		pkgs = import (fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.05") {};
 		wrapper = makewrapper {
-			pkgs = pkgs;
+			inherit pkgs;
 			packageDir = ./2.15.4;
 			wrapperScript = ./2.15.4/index.ts;
 		};
 	in
 	wrapper;
 }
-

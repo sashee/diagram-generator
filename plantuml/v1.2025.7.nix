@@ -1,11 +1,14 @@
+let
+	plantuml_1_2025_4 = import ./v1.2025.4.nix;
+in
 {
 	bin = {
 		version,
 		fontconfig
 	}:
 	let
-		pkgs = import (fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.05") {};
-		wrapper = (import ./v1.2025.4.nix).makewrapper {
+		pkgs = plantuml_1_2025_4.pkgs;
+		wrapper = plantuml_1_2025_4.makewrapper {
 			inherit pkgs fontconfig;
 			src = pkgs.fetchurl {
 				url = "https://github.com/plantuml/plantuml/releases/download/${version}/plantuml-${builtins.substring 1 (-1) version}.jar";
@@ -15,4 +18,3 @@
 	in
 		wrapper;
 }
-
