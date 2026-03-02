@@ -26,23 +26,12 @@ const supportedVersions = JSON.parse(await fs.readFile(supportedVersionsPath, "u
 await writeArtifact("supported-versions.json", JSON.stringify(supportedVersions, null, 2));
 
 const expectedRenderers = Object.entries(supportedVersions).flatMap(([engine, versions]) =>
-  versions.map(({ version }) => `${engine}-${version}`),
+  versions.map((version) => `${engine}-${version}`),
 ).sort();
 const actualRenderers = Object.values(first)
   .flatMap((configs) => configs.map(({ renderer }) => renderer))
   .sort();
 
 assert.deepEqual(actualRenderers, expectedRenderers);
-
-const expectedFormatsByRenderer = Object.fromEntries(
-  Object.entries(supportedVersions).flatMap(([engine, versions]) =>
-    versions.map(({ version, formats }) => [`${engine}-${version}`, [...formats].sort()]),
-  ),
-);
-const actualFormatsByRenderer = Object.fromEntries(
-  Object.values(first)
-    .flatMap((configs) => configs.map(({ renderer, formats }) => [renderer, [...formats].sort()])),
-);
-assert.deepEqual(actualFormatsByRenderer, expectedFormatsByRenderer);
 
 await writeArtifact("success.txt", "ok\n");

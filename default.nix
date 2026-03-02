@@ -1,5 +1,10 @@
 let
-	supported_versions = builtins.fromJSON (builtins.readFile ./supported-versions.json);
+	renderers = import ./renderers.nix;
+
+	supported_versions = builtins.mapAttrs (
+		_engine: modules:
+		builtins.map (module: module.version) modules
+	) renderers;
 in {
 	inherit supported_versions;
 
@@ -27,45 +32,42 @@ in {
 		let
 			sandbox_run = import ./sandbox-run.nix { inherit debug pkgs; };
 
-			available_renderers = {
-				"plantuml" = (map
-					({version, formats}: {
-						bin = (import (./plantuml + "/${version}.nix")).bin {inherit version fontconfig;};
-						version = version;
-						formats = formats;
-						renderer = ''plantuml-${version}'';
-					})
-					versions.plantuml
-				);
-				"recharts" = (map
-					({version, formats}: {
-						bin = (import (./recharts + "/${version}.nix")).bin {version = version;};
-						version = version;
-						formats = formats;
-						renderer = ''recharts-${version}'';
-					})
-					versions.recharts
-				);
-				"swirly" = (map
-					({version, formats}: {
-						bin = (import (./swirly + "/${version}.nix")).bin {version = version;};
-						version = version;
-						formats = formats;
-						renderer = ''swirly-${version}'';
-					})
-					versions.swirly
-				);
-			};
+			resolve_engine_renderers = engine: modules:
+				let
+					requested_versions = if builtins.hasAttr engine versions then builtins.getAttr engine versions else [];
+					module_by_version = builtins.listToAttrs (
+						builtins.map (module: {
+							name = module.version;
+							value = module;
+						}) modules
+					);
+				in
+				builtins.map (
+					version:
+						if builtins.hasAttr version module_by_version
+						then
+							let
+								module = builtins.getAttr version module_by_version;
+							in {
+								bin = module.bin;
+								version = module.version;
+								formats = module.formats;
+								renderer = "${engine}-${module.version}";
+							}
+						else throw "unsupported renderer version '${version}' for engine '${engine}'"
+				) requested_versions;
+
+			available_renderers = builtins.mapAttrs resolve_engine_renderers renderers;
 
 			validated_available_renderers = if pkgs.lib.allUnique
-			(builtins.map
-				(config: config.renderer)
-				(builtins.concatLists (builtins.attrValues available_renderers))
-			)
-			then available_renderers
-			else throw "renderer strings not unique";
+				(builtins.map
+					(config: config.renderer)
+					(builtins.concatLists (builtins.attrValues available_renderers))
+				)
+				then available_renderers
+				else throw "renderer strings not unique";
 		in
-		(import ./diagram-generator.nix {
-			inherit debug fontconfig pkgs sandbox_run validated_available_renderers;
-		}).bin;
+			(import ./diagram-generator.nix {
+				inherit debug fontconfig pkgs sandbox_run validated_available_renderers;
+			}).bin;
 }

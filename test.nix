@@ -3,6 +3,7 @@ let
   pkgs = import nixpkgs { config = {}; overlays = []; };
   packages = import ./default.nix;
   versions = packages.supported_versions;
+  supportedVersionsJson = builtins.toFile "supported-versions.json" (builtins.toJSON versions);
   fontconfig = import ./tests/default-fontconfig.nix { inherit pkgs; };
   fontconfigProfileA = import ./tests/fontconfig-profile-a.nix { inherit pkgs; };
   fontconfigProfileB = import ./tests/fontconfig-profile-b.nix { inherit pkgs; };
@@ -55,7 +56,7 @@ let
     } ''
       set -euo pipefail
       mkdir -p "$out"
-      TEST_OUT_DIR="$out" DIAGRAM_GENERATOR_BIN="${diagramGenerator}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_A="${diagramGeneratorA}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_B="${diagramGeneratorB}/bin/diagram-generator" SVG_TO_PNG_BIN="${svgToPng}/bin/svg-to-png" SVG_FONT_INLINER_BIN="${svgFontInliner}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_A="${svgFontInlinerA}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_B="${svgFontInlinerB}/bin/svg-font-inliner" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "${testsDir}/${file}"
+      TEST_OUT_DIR="$out" DIAGRAM_GENERATOR_BIN="${diagramGenerator}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_A="${diagramGeneratorA}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_B="${diagramGeneratorB}/bin/diagram-generator" SVG_TO_PNG_BIN="${svgToPng}/bin/svg-to-png" SVG_FONT_INLINER_BIN="${svgFontInliner}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_A="${svgFontInlinerA}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_B="${svgFontInlinerB}/bin/svg-font-inliner" SUPPORTED_VERSIONS_JSON="${supportedVersionsJson}" node "${testsDir}/${file}"
     '';
 
   testNames = map (file: pkgs.lib.removeSuffix ".test.mjs" file) testFiles;
@@ -110,7 +111,7 @@ let
       export SVG_FONT_INLINER_BIN="${svgFontInliner}/bin/svg-font-inliner"
       export SVG_FONT_INLINER_BIN_A="${svgFontInlinerA}/bin/svg-font-inliner"
       export SVG_FONT_INLINER_BIN_B="${svgFontInlinerB}/bin/svg-font-inliner"
-      export SUPPORTED_VERSIONS_JSON="${./supported-versions.json}"
+      export SUPPORTED_VERSIONS_JSON="${supportedVersionsJson}"
       export PYFTSUBSET_BIN="${pkgs.python3Packages.fonttools}/bin/pyftsubset"
       export DG_TEST_TMP="$(mktemp -d "''${TMPDIR:-/tmp}/diagram-generator-tests.XXXXXX")"
 

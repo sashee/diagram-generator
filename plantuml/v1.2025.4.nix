@@ -5,11 +5,11 @@ let
 		sha256 = "0v6bd1xk8a2aal83karlvc853x44dg1n4nk08jg3dajqyy0s98np";
 	};
 	pkgs = import nixpkgs_src {};
+	aotFontconfig = import ./aot-fontconfig.nix { inherit pkgs; };
 
-	makewrapper = {pkgs, src, fontconfig}:
+	makewrapper = {pkgs, src}:
 	let
-		setup = ''
-export FONTCONFIG_FILE=${fontconfig}
+		commonSetup = ''
 export PATH="${
 	pkgs.lib.makeBinPath [
 		pkgs.fontconfig
@@ -24,8 +24,17 @@ export PLANTUML_SECURITY_PROFILE="SANDBOX"
 : "''${TMPDIR:=/tmp}"
 		'';
 
+		aotSetup = ''
+export FONTCONFIG_FILE=${aotFontconfig}
+${commonSetup}
+		'';
+
+		runtimeSetup = ''
+${commonSetup}
+		'';
+
 		jsa = pkgs.runCommand "jsa" {} ''
-${setup}
+${aotSetup}
 
 mkdir -p $out
 
@@ -34,7 +43,7 @@ cat ${./aot_testfiles.txt} | ${pkgs.jdk24}/bin/java -XX:AOTMode=create -XX:AOTCo
 		'';
 
 			wrapper = pkgs.writeShellScriptBin "plantuml" ''
-${setup}
+${runtimeSetup}
 
 ${pkgs.jdk24}/bin/java -XX:AOTCache=${jsa}/app.aot -XX:AOTMode=on -jar ${src} "$@"
 	'';
@@ -44,13 +53,15 @@ in
 
 in
 {
+	version = "v1.2025.4";
+	formats = [ "svg" "png" ];
 	inherit pkgs;
 	makewrapper = makewrapper;
-	bin = {version, fontconfig}: let
+	bin = let
 		wrapper = makewrapper {
-			inherit pkgs fontconfig;
+			inherit pkgs;
 			src = pkgs.fetchurl {
-				url = "https://github.com/plantuml/plantuml/releases/download/${version}/plantuml-${builtins.substring 1 (-1) version}.jar";
+				url = "https://github.com/plantuml/plantuml/releases/download/v1.2025.4/plantuml-1.2025.4.jar";
 				hash = "sha256-JlGOFKOgQQDNdsDZbKstEXHzYVIhXt2XkKKNICaCAME=";
 			};
 		};

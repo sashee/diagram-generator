@@ -52,8 +52,10 @@ in
 
 in
 {
+	version = "2.15.4";
+	formats = [ "svg" ];
 	makewrapper = makewrapper;
-	bin = {version}: let
+	bin = let
 		wrapper = makewrapper {
 			inherit pkgs;
 			packageDir = ./2.15.4;
