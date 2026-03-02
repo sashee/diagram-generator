@@ -1,16 +1,36 @@
 let
   nixpkgs = fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.11";
   pkgs = import nixpkgs { config = {}; overlays = []; };
+  packages = import ./default.nix;
+  versions = packages.supported_versions;
   fontconfig = import ./tests/default-fontconfig.nix { inherit pkgs; };
   fontconfigProfileA = import ./tests/fontconfig-profile-a.nix { inherit pkgs; };
   fontconfigProfileB = import ./tests/fontconfig-profile-b.nix { inherit pkgs; };
-  packages = import ./default.nix { debug = false; inherit pkgs fontconfig; };
-  packagesFontconfigA = import ./default.nix {
+  diagramGenerator = packages.diagram_generator {
+    debug = false;
+    inherit pkgs fontconfig versions;
+  };
+  diagramGeneratorA = packages.diagram_generator {
+    debug = false;
+    inherit pkgs versions;
+    fontconfig = fontconfigProfileA;
+  };
+  diagramGeneratorB = packages.diagram_generator {
+    debug = false;
+    inherit pkgs versions;
+    fontconfig = fontconfigProfileB;
+  };
+  svgToPng = packages.svg_to_png { debug = false; inherit pkgs; };
+  svgFontInliner = packages.svg_font_inliner {
+    debug = false;
+    inherit pkgs fontconfig;
+  };
+  svgFontInlinerA = packages.svg_font_inliner {
     debug = false;
     inherit pkgs;
     fontconfig = fontconfigProfileA;
   };
-  packagesFontconfigB = import ./default.nix {
+  svgFontInlinerB = packages.svg_font_inliner {
     debug = false;
     inherit pkgs;
     fontconfig = fontconfigProfileB;
@@ -35,7 +55,7 @@ let
     } ''
       set -euo pipefail
       mkdir -p "$out"
-      TEST_OUT_DIR="$out" DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_A="${packagesFontconfigA.bin}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_B="${packagesFontconfigB.bin}/bin/diagram-generator" SVG_TO_PNG_BIN="${packages.svg_to_png}/bin/svg-to-png" SVG_FONT_INLINER_BIN="${packages.svg_font_inliner}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_A="${packagesFontconfigA.svg_font_inliner}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_B="${packagesFontconfigB.svg_font_inliner}/bin/svg-font-inliner" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "${testsDir}/${file}"
+      TEST_OUT_DIR="$out" DIAGRAM_GENERATOR_BIN="${diagramGenerator}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_A="${diagramGeneratorA}/bin/diagram-generator" DIAGRAM_GENERATOR_BIN_B="${diagramGeneratorB}/bin/diagram-generator" SVG_TO_PNG_BIN="${svgToPng}/bin/svg-to-png" SVG_FONT_INLINER_BIN="${svgFontInliner}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_A="${svgFontInlinerA}/bin/svg-font-inliner" SVG_FONT_INLINER_BIN_B="${svgFontInlinerB}/bin/svg-font-inliner" SUPPORTED_VERSIONS_JSON="${./supported-versions.json}" node "${testsDir}/${file}"
     '';
 
   testNames = map (file: pkgs.lib.removeSuffix ".test.mjs" file) testFiles;
@@ -53,11 +73,11 @@ let
       ++ [
         {
           name = "svg-font-inliner";
-          path = packages.svg_font_inliner;
+          path = svgFontInliner;
         }
         {
           name = "svg-to-png";
-          path = packages.svg_to_png;
+          path = svgToPng;
         }
       ]
     );
@@ -83,13 +103,13 @@ let
       pkgs.fontconfig
     ];
     shellHook = ''
-      export DIAGRAM_GENERATOR_BIN="${packages.bin}/bin/diagram-generator"
-      export DIAGRAM_GENERATOR_BIN_A="${packagesFontconfigA.bin}/bin/diagram-generator"
-      export DIAGRAM_GENERATOR_BIN_B="${packagesFontconfigB.bin}/bin/diagram-generator"
-      export SVG_TO_PNG_BIN="${packages.svg_to_png}/bin/svg-to-png"
-      export SVG_FONT_INLINER_BIN="${packages.svg_font_inliner}/bin/svg-font-inliner"
-      export SVG_FONT_INLINER_BIN_A="${packagesFontconfigA.svg_font_inliner}/bin/svg-font-inliner"
-      export SVG_FONT_INLINER_BIN_B="${packagesFontconfigB.svg_font_inliner}/bin/svg-font-inliner"
+      export DIAGRAM_GENERATOR_BIN="${diagramGenerator}/bin/diagram-generator"
+      export DIAGRAM_GENERATOR_BIN_A="${diagramGeneratorA}/bin/diagram-generator"
+      export DIAGRAM_GENERATOR_BIN_B="${diagramGeneratorB}/bin/diagram-generator"
+      export SVG_TO_PNG_BIN="${svgToPng}/bin/svg-to-png"
+      export SVG_FONT_INLINER_BIN="${svgFontInliner}/bin/svg-font-inliner"
+      export SVG_FONT_INLINER_BIN_A="${svgFontInlinerA}/bin/svg-font-inliner"
+      export SVG_FONT_INLINER_BIN_B="${svgFontInlinerB}/bin/svg-font-inliner"
       export SUPPORTED_VERSIONS_JSON="${./supported-versions.json}"
       export PYFTSUBSET_BIN="${pkgs.python3Packages.fonttools}/bin/pyftsubset"
       export DG_TEST_TMP="$(mktemp -d "''${TMPDIR:-/tmp}/diagram-generator-tests.XXXXXX")"
