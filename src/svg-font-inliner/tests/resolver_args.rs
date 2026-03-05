@@ -376,6 +376,20 @@ fn malformed_svg_returns_parse_error() {
 }
 
 #[test]
+fn svg_with_doctype_is_accepted() {
+    let svg = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60">
+  <text x="10" y="40" font-family="'FontA'">A</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("SVG with DOCTYPE should be accepted");
+    assert!(output.contains("@font-face"));
+}
+
+#[test]
 fn data_url_format_is_correct_and_decodable() {
     let svg = svg_with_single_text("'FontA'");
     let font_path = fixture_font_path("font-a.ttf");

@@ -117,6 +117,38 @@ visitor --> api: ...execute-api.amazonaws.com
 @enduml
 `,
     },
+    {
+      name: "salt-security-checklist",
+      code: `
+@startuml
+
+(*) --> "
+{{
+salt
+{
+<b>Security checklist
+~~
+[] Data encrypted?
+~~
+}
+}}
+" as initial
+
+initial -down->[Enable SSE-S3] "
+{{
+salt
+{
+<b>Security checklist
+~~
+[X] Data encrypted?
+~~
+}
+}}
+"
+
+@enduml
+`,
+    },
   ],
   recharts: [
     {
@@ -156,6 +188,24 @@ E := P5
 };
 
 const sanitize = (str) => str.replace(/[^a-zA-Z0-9._-]/g, "_");
+
+const assertSingleSuccessfulOutput = ({ item, renderer, format }) => {
+  const hasResult = Object.hasOwn(item, "result");
+  const hasError = Object.hasOwn(item, "error");
+  assert.notEqual(
+    hasResult,
+    hasError,
+    `${renderer}: expected exactly one of result/error for ${format}, got ${JSON.stringify(item)}`,
+  );
+
+  if (hasError) {
+    const errorMessage = typeof item.error === "string" ? item.error : JSON.stringify(item.error);
+    assert.fail(`${renderer}: render ${format} failed: ${errorMessage}`);
+  }
+
+  assert.equal(typeof item.result, "string", `${renderer}: expected ${format} result string`);
+  return item.result;
+};
 
 const available = await listRenderers();
 
@@ -245,8 +295,8 @@ await runWithConcurrency(jobs, 5, async ({ renderer, name, code, format }) => {
       assertSuccess(result);
       const parsed = parseJson(result.stdout);
       assert.equal(parsed.length, 1, `${renderer}: expected one png output item`);
-      assert.equal(typeof parsed[0].result, "string", `${renderer}: expected png result string`);
-      const pngBytes = Buffer.from(parsed[0].result, "base64");
+      const pngBase64 = assertSingleSuccessfulOutput({ item: parsed[0], renderer, format: "png" });
+      const pngBytes = Buffer.from(pngBase64, "base64");
       assert(pngBytes.length > 8, `${renderer}: decoded png should not be empty`);
       const signature = pngBytes.subarray(0, 8).toString("hex");
       assert.equal(signature, "89504e470d0a1a0a", `${renderer}: output does not look like png`);
@@ -269,8 +319,7 @@ await runWithConcurrency(jobs, 5, async ({ renderer, name, code, format }) => {
     assertSuccess(result);
     const parsed = parseJson(result.stdout);
     assert.equal(parsed.length, 1, `${renderer}: expected one svg output item`);
-    assert.equal(typeof parsed[0].result, "string", `${renderer}: expected svg result string`);
-    const svg = parsed[0].result;
+    const svg = assertSingleSuccessfulOutput({ item: parsed[0], renderer, format: "svg" });
     assert(svg.includes("<svg"), `${renderer}: expected <svg in output`);
     assert(svg.includes("</svg>"), `${renderer}: expected </svg> in output`);
     await writeArtifact(`${prefix}.svg`, svg);

@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -175,6 +176,68 @@ fn find_tag_end_outside_quotes(fragment: &str) -> Option<usize> {
         }
     }
     None
+}
+
+fn is_svg_local_name(name: &[u8]) -> bool {
+    let local = match name.rsplit(|b| *b == b':').next() {
+        Some(value) => value,
+        None => name,
+    };
+    local.eq_ignore_ascii_case(b"svg")
+}
+
+fn find_doctype_range_before_root_svg(svg: &str) -> Result<Option<(usize, usize)>, String> {
+    let mut reader = quick_xml::Reader::from_str(svg);
+    let mut doctype_range: Option<(usize, usize)> = None;
+
+    loop {
+        let start = usize::try_from(reader.buffer_position())
+            .map_err(|_| "failed to scan SVG prolog: parser position overflow".to_string())?;
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::DocType(_)) => {
+                let end = usize::try_from(reader.buffer_position()).map_err(|_| {
+                    "failed to scan SVG prolog: parser position overflow".to_string()
+                })?;
+                doctype_range = Some((start, end));
+            }
+            Ok(quick_xml::events::Event::Start(tag)) | Ok(quick_xml::events::Event::Empty(tag)) => {
+                if is_svg_local_name(tag.name().as_ref()) {
+                    return Ok(doctype_range);
+                }
+                return Ok(None);
+            }
+            Ok(quick_xml::events::Event::Eof) => return Ok(doctype_range),
+            Ok(_) => {}
+            Err(err) => return Err(format!("failed to scan SVG prolog: {err}")),
+        }
+    }
+}
+
+fn scrub_range_preserve_offsets(svg: &str, start: usize, end: usize) -> String {
+    let mut out = String::with_capacity(svg.len());
+    out.push_str(&svg[..start]);
+    for b in svg[start..end].bytes() {
+        match b {
+            b'\n' => out.push('\n'),
+            b'\r' => out.push('\r'),
+            b'\t' => out.push('\t'),
+            _ => out.push(' '),
+        }
+    }
+    out.push_str(&svg[end..]);
+    out
+}
+
+fn normalize_svg_for_strict_parse(svg: &str) -> Result<Cow<'_, str>, String> {
+    let Some((start, end)) = find_doctype_range_before_root_svg(svg)? else {
+        return Ok(Cow::Borrowed(svg));
+    };
+
+    if start >= end || end > svg.len() {
+        return Ok(Cow::Borrowed(svg));
+    }
+
+    Ok(Cow::Owned(scrub_range_preserve_offsets(svg, start, end)))
 }
 
 #[cfg(test)]
@@ -650,7 +713,23 @@ fn collect_existing_faces_from_style_css(
 fn collect_existing_faces_and_strip_font_face_rules(
     svg: &str,
 ) -> Result<(String, Vec<ExistingFace>, usize), String> {
-    let doc = roxmltree::Document::parse(svg).map_err(|e| format!("failed to parse SVG: {e}"))?;
+    let normalized_svg: Option<String>;
+    let doc = match roxmltree::Document::parse(svg) {
+        Ok(doc) => doc,
+        Err(original_err) => {
+            let normalized = normalize_svg_for_strict_parse(svg)?;
+            let Cow::Owned(owned) = normalized else {
+                return Err(format!("failed to parse SVG: {original_err}"));
+            };
+            normalized_svg = Some(owned);
+            roxmltree::Document::parse(
+                normalized_svg
+                    .as_deref()
+                    .expect("normalized SVG should be present"),
+            )
+            .map_err(|_| format!("failed to parse SVG: {original_err}"))?
+        }
+    };
 
     let root = doc.root_element();
     if !root.is_element() || root.tag_name().name() != "svg" {
@@ -1109,11 +1188,28 @@ fn fallback_query_from_used_fonts(
     })
 }
 
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+
+    let Ok(left_canonical) = std::fs::canonicalize(left) else {
+        return false;
+    };
+    let Ok(right_canonical) = std::fs::canonicalize(right) else {
+        return false;
+    };
+
+    left_canonical == right_canonical
+}
+
 fn find_face_id_for_path(db: &usvg::fontdb::Database, path: &Path) -> Option<usvg::fontdb::ID> {
     for face in db.faces() {
         match &face.source {
-            usvg::fontdb::Source::File(face_path) if face_path == path => return Some(face.id),
-            usvg::fontdb::Source::SharedFile(face_path, _) if face_path == path => {
+            usvg::fontdb::Source::File(face_path) if paths_equivalent(face_path, path) => {
+                return Some(face.id);
+            }
+            usvg::fontdb::Source::SharedFile(face_path, _) if paths_equivalent(face_path, path) => {
                 return Some(face.id);
             }
             _ => {}
@@ -1128,28 +1224,45 @@ fn ensure_font_loaded(
     loaded_paths: &Arc<Mutex<BTreeSet<PathBuf>>>,
     path: &Path,
 ) -> Result<usvg::fontdb::ID, String> {
-    let should_load = {
+    if let Some(id) = find_face_id_for_path(db, path) {
         let mut loaded = loaded_paths
             .lock()
             .map_err(|_| "failed to access loaded font path set".to_string())?;
-        loaded.insert(path.to_path_buf())
-    };
-
-    if should_load {
-        Arc::make_mut(db).load_font_file(path).map_err(|err| {
-            format!(
-                "failed to load font '{}' into usvg db: {err}",
-                path.display()
-            )
-        })?;
+        loaded.insert(path.to_path_buf());
+        return Ok(id);
     }
 
-    find_face_id_for_path(db, path).ok_or_else(|| {
+    let before_ids = db.faces().map(|face| face.id).collect::<BTreeSet<_>>();
+
+    Arc::make_mut(db).load_font_file(path).map_err(|err| {
         format!(
-            "loaded font '{}' but could not find face id in font database",
+            "failed to load font '{}' into usvg db: {err}",
             path.display()
         )
-    })
+    })?;
+
+    let mut loaded = loaded_paths
+        .lock()
+        .map_err(|_| "failed to access loaded font path set".to_string())?;
+    loaded.insert(path.to_path_buf());
+
+    if let Some(id) = find_face_id_for_path(db, path) {
+        return Ok(id);
+    }
+
+    if let Some(id) = db.faces().find_map(|face| {
+        if before_ids.contains(&face.id) {
+            return None;
+        }
+        Some(face.id)
+    }) {
+        return Ok(id);
+    }
+
+    Err(format!(
+        "loaded font '{}' but could not find face id in font database",
+        path.display()
+    ))
 }
 
 fn detect_font_type(path: &Path) -> (&'static str, &'static str) {
@@ -1826,6 +1939,13 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    fn fixture_font_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
     #[test]
     fn inject_style_block_preserves_xml_declaration_and_text() {
         let input = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"><text>hello</text></svg>";
@@ -1915,6 +2035,21 @@ mod tests {
         assert!(families
             .iter()
             .any(|f| f.contains(&"sans-serif".to_string())));
+    }
+
+    #[test]
+    fn ensure_font_loaded_recovers_when_path_already_marked_loaded() {
+        let font_path = fixture_font_path("font-a.ttf");
+        let mut db = Arc::new(usvg::fontdb::Database::new());
+        let loaded_paths = Arc::new(Mutex::new(BTreeSet::from([font_path.clone()])));
+
+        let id = ensure_font_loaded(&mut db, &loaded_paths, &font_path)
+            .expect("should recover and resolve face id even when path was already marked loaded");
+
+        assert!(
+            db.face(id).is_some(),
+            "resolved face id should exist in database"
+        );
     }
 
     #[test]
