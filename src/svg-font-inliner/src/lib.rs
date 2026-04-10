@@ -240,17 +240,51 @@ fn normalize_svg_for_strict_parse(svg: &str) -> Result<Cow<'_, str>, String> {
     Ok(Cow::Owned(scrub_range_preserve_offsets(svg, start, end)))
 }
 
-#[cfg(test)]
 fn find_root_svg_open_tag_end(svg: &str) -> Option<usize> {
-    let doc = roxmltree::Document::parse(svg).ok()?;
-    let root = doc.root_element();
-    if !root.is_element() || root.tag_name().name() != "svg" {
-        return None;
+    let mut cursor = 0usize;
+    while let Some(rel_start) = svg[cursor..].find('<') {
+        let start = cursor + rel_start;
+        let fragment = &svg[start..];
+        if fragment.starts_with("<!--") {
+            let rel_end = fragment.find("-->")?;
+            cursor = start + rel_end + 3;
+            continue;
+        }
+        if fragment.starts_with("<?") {
+            let rel_end = fragment.find("?>")?;
+            cursor = start + rel_end + 2;
+            continue;
+        }
+        if fragment.starts_with("<!") {
+            let rel_end = find_tag_end_outside_quotes(fragment)?;
+            cursor = start + rel_end + 1;
+            continue;
+        }
+        if !fragment[1..].to_ascii_lowercase().starts_with("svg") {
+            cursor = start + 1;
+            continue;
+        }
+
+        let next = fragment.as_bytes().get(4).copied();
+        if next.is_some_and(|b| !(b.is_ascii_whitespace() || b == b'>' || b == b'/')) {
+            cursor = start + 1;
+            continue;
+        }
+
+        let open_rel = find_tag_end_outside_quotes(fragment)?;
+        return Some(start + open_rel + 1);
     }
-    let range = root.range();
-    let root_fragment = &svg[range.start..range.end];
-    let open_rel = find_tag_end_outside_quotes(root_fragment)?;
-    Some(range.start + open_rel + 1)
+
+    None
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn normalize_css_string_value(value: &str) -> String {
@@ -717,17 +751,38 @@ fn collect_existing_faces_and_strip_font_face_rules(
     let doc = match roxmltree::Document::parse(svg) {
         Ok(doc) => doc,
         Err(original_err) => {
-            let normalized = normalize_svg_for_strict_parse(svg)?;
-            let Cow::Owned(owned) = normalized else {
-                return Err(format!("failed to parse SVG: {original_err}"));
-            };
-            normalized_svg = Some(owned);
-            roxmltree::Document::parse(
-                normalized_svg
-                    .as_deref()
-                    .expect("normalized SVG should be present"),
-            )
-            .map_err(|_| format!("failed to parse SVG: {original_err}"))?
+            let quote_normalized = normalize_inner_attribute_quotes_preserve_offsets(svg);
+            if roxmltree::Document::parse(&quote_normalized).is_ok() {
+                normalized_svg = Some(quote_normalized);
+                roxmltree::Document::parse(
+                    normalized_svg
+                        .as_deref()
+                        .expect("quote-normalized SVG should be present"),
+                )
+                .map_err(|_| format!("failed to parse SVG: {original_err}"))?
+            } else {
+                let normalized = normalize_svg_for_strict_parse(svg)?;
+                let Cow::Owned(owned) = normalized else {
+                    let Some(root_open_end) = find_root_svg_open_tag_end(svg) else {
+                        return Err(format!("failed to parse SVG: {original_err}"));
+                    };
+                    return Ok((svg.to_string(), Vec::new(), root_open_end));
+                };
+                normalized_svg = Some(owned);
+                match roxmltree::Document::parse(
+                    normalized_svg
+                        .as_deref()
+                        .expect("normalized SVG should be present"),
+                ) {
+                    Ok(doc) => doc,
+                    Err(_) => {
+                        let Some(root_open_end) = find_root_svg_open_tag_end(svg) else {
+                            return Err(format!("failed to parse SVG: {original_err}"));
+                        };
+                        return Ok((svg.to_string(), Vec::new(), root_open_end));
+                    }
+                }
+            }
         }
     };
 
@@ -1265,6 +1320,567 @@ fn ensure_font_loaded(
     ))
 }
 
+fn remove_font_family_attr_from_start_tag(start_tag: &str) -> String {
+    let marker = " font-family=\"";
+    let Some(attr_start) = start_tag.find(marker) else {
+        return start_tag.to_string();
+    };
+    let value_start = attr_start + marker.len();
+    let Some(rel_end_quote) = start_tag[value_start..].find('"') else {
+        return start_tag.to_string();
+    };
+    let attr_end = value_start + rel_end_quote + 1;
+
+    let mut out = String::with_capacity(start_tag.len());
+    out.push_str(&start_tag[..attr_start]);
+    out.push_str(&start_tag[attr_end..]);
+    out
+}
+
+fn rewrite_font_family_in_start_tag(start_tag: &str, family: Option<&str>) -> String {
+    let mut out = remove_font_family_attr_from_start_tag(start_tag);
+    let insert_at = if out.ends_with("/>") {
+        out.len().saturating_sub(2)
+    } else {
+        out.len().saturating_sub(1)
+    };
+
+    if let Some(family) = family {
+        let escaped = xml_escape_attr(family);
+        out.insert_str(insert_at, &format!(" font-family=\"{escaped}\""));
+    }
+
+    out
+}
+
+fn sanitize_css_declaration_block(block: &str) -> String {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+
+    while cursor < block.len() {
+        let decl = &block[cursor..];
+        let end = find_declaration_terminator(decl);
+        let declaration = decl[..end].trim();
+
+        let keep = declaration
+            .split_once(':')
+            .map(|(name, _)| {
+                let name = name.trim();
+                !name.eq_ignore_ascii_case("font-family") && !name.eq_ignore_ascii_case("font")
+            })
+            .unwrap_or(true);
+
+        if keep && !declaration.is_empty() {
+            if !out.is_empty() && !out.ends_with(|c: char| c.is_whitespace() || c == '{') {
+                out.push(' ');
+            }
+            out.push_str(declaration);
+            out.push(';');
+        }
+
+        if end == decl.len() {
+            break;
+        }
+        cursor += end + 1;
+    }
+
+    out
+}
+
+fn sanitize_preserved_css(css: &str) -> String {
+    let mut out = String::new();
+    let mut cursor = 0usize;
+
+    while let Some(rel_open) = css[cursor..].find('{') {
+        let open = cursor + rel_open;
+        let Some(close_rel) = find_block_end(&css[open..]) else {
+            out.push_str(&css[cursor..]);
+            return out;
+        };
+        let close = open + close_rel;
+        out.push_str(&css[cursor..=open]);
+        let inner = &css[open + 1..close];
+        if inner.contains('{') {
+            out.push_str(&sanitize_preserved_css(inner));
+        } else {
+            out.push_str(&sanitize_css_declaration_block(inner));
+        }
+        out.push('}');
+        cursor = close + 1;
+    }
+
+    out.push_str(&css[cursor..]);
+    out
+}
+
+fn collect_preserved_style_css(svg: &str) -> Result<String, String> {
+    let normalized_svg: Option<String>;
+    let doc = match roxmltree::Document::parse(svg) {
+        Ok(doc) => doc,
+        Err(original_err) => {
+            let quote_normalized = normalize_inner_attribute_quotes_preserve_offsets(svg);
+            if roxmltree::Document::parse(&quote_normalized).is_ok() {
+                normalized_svg = Some(quote_normalized);
+                roxmltree::Document::parse(
+                    normalized_svg
+                        .as_deref()
+                        .expect("normalized SVG should be present"),
+                )
+                .map_err(|_| {
+                    format!("failed to parse SVG while collecting preserved CSS: {original_err}")
+                })?
+            } else {
+                let normalized = normalize_svg_for_strict_parse(svg)?;
+                let Cow::Owned(owned) = normalized else {
+                    return Err(format!(
+                        "failed to parse SVG while collecting preserved CSS: {original_err}"
+                    ));
+                };
+                normalized_svg = Some(owned);
+                roxmltree::Document::parse(
+                    normalized_svg
+                        .as_deref()
+                        .expect("normalized SVG should be present"),
+                )
+                .map_err(|_| {
+                    format!("failed to parse SVG while collecting preserved CSS: {original_err}")
+                })?
+            }
+        }
+    };
+    let css = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "style")
+        .filter_map(|n| n.text())
+        .map(sanitize_preserved_css)
+        .filter(|css| !css.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(css)
+}
+
+fn collect_preserved_defs_content(
+    source_svg: &str,
+    normalized_svg: &str,
+) -> Result<String, String> {
+    let normalized_source_svg: Option<String>;
+    let source_doc = match roxmltree::Document::parse(source_svg) {
+        Ok(doc) => doc,
+        Err(original_err) => {
+            let normalized = normalize_svg_for_strict_parse(source_svg)?;
+            let Cow::Owned(owned) = normalized else {
+                return Ok(String::new());
+            };
+            normalized_source_svg = Some(owned);
+            roxmltree::Document::parse(
+                normalized_source_svg
+                    .as_deref()
+                    .expect("normalized SVG should be present"),
+            )
+            .unwrap_or_else(|_| {
+                let _ = original_err;
+                return roxmltree::Document::parse("<svg xmlns=\"http://www.w3.org/2000/svg\"/>")
+                    .expect("fallback svg should parse");
+            })
+        }
+    };
+    let Ok(normalized_doc) = roxmltree::Document::parse(normalized_svg) else {
+        return Ok(String::new());
+    };
+
+    let existing_ids = normalized_doc
+        .descendants()
+        .filter(|n| n.is_element())
+        .filter_map(|n| n.attribute("id").map(str::to_string))
+        .collect::<BTreeSet<_>>();
+
+    let mut fragments = Vec::new();
+    for defs in source_doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "defs")
+    {
+        for child in defs.children().filter(|n| n.is_element()) {
+            if child.tag_name().name() == "style" {
+                continue;
+            }
+            if child
+                .attribute("id")
+                .is_some_and(|id| existing_ids.contains(id))
+            {
+                continue;
+            }
+            let range = child.range();
+            fragments.push(source_svg[range.start..range.end].to_string());
+        }
+    }
+
+    Ok(fragments.join(""))
+}
+
+fn alias_key_for_request(request: &FontQuery, path: &Path) -> (PathBuf, String, u16, String) {
+    (
+        path.to_path_buf(),
+        request.style.clone(),
+        request.weight,
+        request.stretch.clone(),
+    )
+}
+
+fn synthetic_family_name(request: &FontQuery, font: &EmbeddedFont) -> String {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(font.base64_data.as_bytes());
+    bytes.extend_from_slice(request.style.as_bytes());
+    bytes.extend_from_slice(request.stretch.as_bytes());
+    bytes.extend_from_slice(request.weight.to_string().as_bytes());
+    let hash = fnv1a64(&bytes);
+    format!("svg-font-{hash:016x}")
+}
+
+fn path_supports_char(
+    db: &mut Arc<usvg::fontdb::Database>,
+    loaded_paths: &Arc<Mutex<BTreeSet<PathBuf>>>,
+    cache: &mut BTreeMap<(PathBuf, char), bool>,
+    path: &Path,
+    c: char,
+) -> Result<bool, String> {
+    let key = (path.to_path_buf(), c);
+    if let Some(result) = cache.get(&key) {
+        return Ok(*result);
+    }
+
+    let id = ensure_font_loaded(db, loaded_paths, path)?;
+    let supports = db_face_supports_char(db, id, c);
+    cache.insert(key, supports);
+    Ok(supports)
+}
+
+fn collect_span_alias_lists(
+    tree: &usvg::Tree,
+    resolved_paths: &BTreeMap<FontQuery, PathBuf>,
+    runtime_to_emit: &BTreeMap<PathBuf, PathBuf>,
+    alias_by_key: &BTreeMap<(PathBuf, String, u16, String), String>,
+    alias_by_descriptor: &BTreeMap<(String, u16, String), String>,
+) -> Result<Vec<String>, String> {
+    fn visit_group(
+        group: &usvg::Group,
+        resolved_paths: &BTreeMap<FontQuery, PathBuf>,
+        runtime_to_emit: &BTreeMap<PathBuf, PathBuf>,
+        alias_by_key: &BTreeMap<(PathBuf, String, u16, String), String>,
+        alias_by_descriptor: &BTreeMap<(String, u16, String), String>,
+        db: &mut Arc<usvg::fontdb::Database>,
+        loaded_paths: &Arc<Mutex<BTreeSet<PathBuf>>>,
+        support_cache: &mut BTreeMap<(PathBuf, char), bool>,
+        out: &mut Vec<String>,
+    ) -> Result<(), String> {
+        for node in group.children() {
+            match node {
+                usvg::Node::Group(child) => visit_group(
+                    child,
+                    resolved_paths,
+                    runtime_to_emit,
+                    alias_by_key,
+                    alias_by_descriptor,
+                    db,
+                    loaded_paths,
+                    support_cache,
+                    out,
+                )?,
+                usvg::Node::Text(text) => {
+                    for chunk in text.chunks() {
+                        for span in chunk.spans() {
+                            let primary_query = font_spec_to_query(span.font(), None);
+                            let primary_runtime = resolved_paths.get(&primary_query).ok_or_else(|| {
+                                format!(
+                                    "failed to map normalized text span to resolved font request: {primary_query:?}"
+                                )
+                            })?;
+                            let primary_emit = runtime_to_emit
+                                .get(primary_runtime)
+                                .cloned()
+                                .unwrap_or_else(|| primary_runtime.clone());
+
+                            let primary_key = alias_key_for_request(&primary_query, &primary_emit);
+                            let primary_alias = alias_by_key
+                                .get(&primary_key)
+                                .cloned()
+                                .or_else(|| {
+                                    alias_by_descriptor
+                                        .get(&(
+                                            primary_query.style.clone(),
+                                            primary_query.weight,
+                                            primary_query.stretch.clone(),
+                                        ))
+                                        .cloned()
+                                })
+                                .ok_or_else(|| {
+                                    format!(
+                                        "missing synthetic alias for normalized span face: {primary_query:?} -> {}",
+                                        primary_emit.display()
+                                    )
+                                })?;
+
+                            let mut aliases = vec![primary_alias];
+                            let mut used_runtime_paths = vec![primary_runtime.clone()];
+
+                            for c in chunk.text()[span.start()..span.end()].chars() {
+                                let already_supported = used_runtime_paths.iter().try_fold(
+                                    false,
+                                    |supported, runtime_path| {
+                                        if supported {
+                                            return Ok(true);
+                                        }
+                                        path_supports_char(
+                                            db,
+                                            loaded_paths,
+                                            support_cache,
+                                            runtime_path,
+                                            c,
+                                        )
+                                    },
+                                )?;
+                                if already_supported {
+                                    continue;
+                                }
+
+                                let mut fallback_query = primary_query.clone();
+                                fallback_query.missing_char = Some(c);
+                                let fallback_runtime = resolved_paths.get(&fallback_query).ok_or_else(|| {
+                                    format!(
+                                        "failed to map normalized span fallback request: {fallback_query:?}"
+                                    )
+                                })?;
+                                if used_runtime_paths.contains(fallback_runtime) {
+                                    continue;
+                                }
+
+                                used_runtime_paths.push(fallback_runtime.clone());
+                                let fallback_emit = runtime_to_emit
+                                    .get(fallback_runtime)
+                                    .cloned()
+                                    .unwrap_or_else(|| fallback_runtime.clone());
+                                let fallback_key =
+                                    alias_key_for_request(&fallback_query, &fallback_emit);
+                                let fallback_alias = alias_by_key
+                                    .get(&fallback_key)
+                                    .cloned()
+                                    .or_else(|| {
+                                        alias_by_descriptor
+                                            .get(&(
+                                                fallback_query.style.clone(),
+                                                fallback_query.weight,
+                                                fallback_query.stretch.clone(),
+                                            ))
+                                            .cloned()
+                                    })
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "missing synthetic alias for normalized fallback face: {fallback_query:?} -> {}",
+                                            fallback_emit.display()
+                                        )
+                                    })?;
+                                aliases.push(fallback_alias);
+                            }
+
+                            aliases.dedup();
+                            out.push(aliases.join(", "));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    let mut db = Arc::new(usvg::fontdb::Database::new());
+    let loaded_paths = Arc::new(Mutex::new(BTreeSet::new()));
+    let mut support_cache = BTreeMap::new();
+    let mut out = Vec::new();
+    visit_group(
+        tree.root(),
+        resolved_paths,
+        runtime_to_emit,
+        alias_by_key,
+        alias_by_descriptor,
+        &mut db,
+        &loaded_paths,
+        &mut support_cache,
+        &mut out,
+    )?;
+    Ok(out)
+}
+
+fn escape_inner_quotes_in_font_family_attrs(svg: &str) -> String {
+    let marker = "font-family=\"";
+    let mut out = String::with_capacity(svg.len());
+    let mut cursor = 0usize;
+
+    while let Some(rel_start) = svg[cursor..].find(marker) {
+        let attr_start = cursor + rel_start;
+        let value_start = attr_start + marker.len();
+        out.push_str(&svg[cursor..value_start]);
+
+        let mut i = value_start;
+        while i < svg.len() {
+            let mut chars = svg[i..].chars();
+            let Some(ch) = chars.next() else {
+                break;
+            };
+            let ch_len = ch.len_utf8();
+            if ch == '"' {
+                let next = svg[i + ch_len..].chars().next();
+                let is_closing = next.is_none()
+                    || next.is_some_and(|c| c.is_whitespace() || c == '/' || c == '>');
+                if is_closing {
+                    out.push('"');
+                    i += ch_len;
+                    break;
+                }
+                out.push_str("&quot;");
+                i += ch_len;
+                continue;
+            }
+
+            out.push(ch);
+            i += ch_len;
+        }
+
+        cursor = i;
+    }
+
+    out.push_str(&svg[cursor..]);
+    out
+}
+
+fn normalize_inner_attribute_quotes_preserve_offsets(svg: &str) -> String {
+    let bytes = svg.as_bytes();
+    let mut out = String::with_capacity(svg.len());
+    let mut i = 0usize;
+    let mut in_tag = false;
+    let mut in_double_quote = false;
+    let mut in_special = false;
+
+    while i < bytes.len() {
+        if !in_tag {
+            if bytes[i] == b'<' {
+                in_tag = true;
+                in_special = bytes.get(i + 1).copied() == Some(b'!')
+                    || bytes.get(i + 1).copied() == Some(b'?');
+            }
+            out.push(bytes[i] as char);
+            i += 1;
+            continue;
+        }
+
+        let b = bytes[i];
+        if in_special {
+            out.push(b as char);
+            if b == b'>' {
+                in_tag = false;
+                in_special = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if in_double_quote {
+            if b == b'"' {
+                let next = bytes.get(i + 1).copied();
+                let is_closing = next.is_none()
+                    || next.is_some_and(|n| n.is_ascii_whitespace() || n == b'/' || n == b'>');
+                out.push(if is_closing { '"' } else { '\'' });
+                if is_closing {
+                    in_double_quote = false;
+                }
+            } else if b == b'<' {
+                out.push('.');
+            } else {
+                out.push(b as char);
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'"' => {
+                in_double_quote = true;
+                out.push('"');
+            }
+            b'>' => {
+                in_tag = false;
+                out.push('>');
+            }
+            _ => out.push(b as char),
+        }
+        i += 1;
+    }
+
+    out
+}
+
+fn rewrite_normalized_svg_font_families(
+    svg: &str,
+    span_alias_lists: &[String],
+) -> Result<String, String> {
+    let mut span_index = 0usize;
+
+    let source = escape_inner_quotes_in_font_family_attrs(svg);
+    let mut out = String::with_capacity(source.len());
+    let mut cursor = 0usize;
+    while let Some(rel_start) = source[cursor..].find('<') {
+        let start = cursor + rel_start;
+        out.push_str(&source[cursor..start]);
+
+        let fragment = &source[start..];
+        let Some(end_rel) = find_tag_end_outside_quotes(fragment) else {
+            out.push_str(fragment);
+            cursor = source.len();
+            break;
+        };
+        let end = start + end_rel + 1;
+        let start_tag = &source[start..end];
+
+        let replacement = if start_tag.starts_with("<svg")
+            || start_tag.starts_with("<text ")
+            || start_tag.starts_with("<text>")
+            || start_tag.starts_with("<textPath")
+            || start_tag.starts_with("<tspan")
+        {
+            if start_tag.starts_with("<tspan") && start_tag.contains(" font-size=\"") {
+                let family = span_alias_lists.get(span_index).ok_or_else(|| {
+                    "missing span alias list during normalized SVG rewrite".to_string()
+                })?;
+                span_index += 1;
+                rewrite_font_family_in_start_tag(start_tag, Some(family))
+            } else if start_tag.contains(" font-family=\"") {
+                rewrite_font_family_in_start_tag(start_tag, None)
+            } else {
+                start_tag.to_string()
+            }
+        } else {
+            start_tag.to_string()
+        };
+
+        out.push_str(&replacement);
+        cursor = end;
+    }
+
+    if cursor < source.len() {
+        out.push_str(&source[cursor..]);
+    }
+
+    if span_index != span_alias_lists.len() {
+        return Err(format!(
+            "normalized SVG span count mismatch: writer emitted {} styled tspans but tree reported {} spans",
+            span_index,
+            span_alias_lists.len()
+        ));
+    }
+
+    Ok(out)
+}
+
 fn detect_font_type(path: &Path) -> (&'static str, &'static str) {
     match path
         .extension()
@@ -1282,15 +1898,16 @@ fn detect_font_type(path: &Path) -> (&'static str, &'static str) {
 }
 
 fn build_css(
-    request_to_font: &[(FontQuery, PathBuf)],
+    emitted_faces: &[(String, FontQuery, PathBuf)],
+    preserved_css: &str,
     embedded: &BTreeMap<PathBuf, EmbeddedFont>,
 ) -> String {
     let mut css = String::new();
-    for (request, path) in request_to_font {
-        let family = match request.families.first() {
-            Some(f) => f,
-            None => continue,
-        };
+    if !preserved_css.trim().is_empty() {
+        css.push_str(preserved_css.trim());
+        css.push('\n');
+    }
+    for (family, request, path) in emitted_faces {
         let font = match embedded.get(path) {
             Some(v) => v,
             None => continue,
@@ -1362,6 +1979,17 @@ fn inject_style_block_at(
     Ok(out)
 }
 
+fn inject_raw_at(svg: &str, insert_at: usize, raw: &str) -> Result<String, String> {
+    if insert_at > svg.len() {
+        return Err("failed to find root <svg> opening tag".to_string());
+    }
+    let mut out = String::with_capacity(svg.len() + raw.len());
+    out.push_str(&svg[..insert_at]);
+    out.push_str(raw);
+    out.push_str(&svg[insert_at..]);
+    Ok(out)
+}
+
 #[cfg(test)]
 fn inject_style_block(svg: &str, debug_comments: &str, css: &str) -> Result<String, String> {
     let insert_at = find_root_svg_open_tag_end(svg)
@@ -1373,7 +2001,7 @@ pub fn embed_svg_fonts<F>(input_svg: &str, resolver: F) -> Result<String, String
 where
     F: Fn(&FontQuery) -> Result<PathBuf, String> + Send + Sync + 'static,
 {
-    let (stripped_svg, existing_faces, root_open_end) =
+    let (stripped_svg, existing_faces, _root_open_end) =
         collect_existing_faces_and_strip_font_face_rules(input_svg)?;
 
     let existing_font_temp =
@@ -1593,6 +2221,9 @@ where
 
                     match ensure_font_loaded(db, &loaded_paths_for_select_fallback, &path) {
                         Ok(id) => {
+                            if used_fonts.contains(&id) {
+                                return None;
+                            }
                             if let Ok(mut map) = face_query_context_for_select_fallback.lock() {
                                 map.insert(id, query.clone());
                             }
@@ -1620,7 +2251,8 @@ where
         }),
     };
 
-    usvg::Tree::from_data(stripped_svg.as_bytes(), &options)
+    let usvg_input = normalize_inner_attribute_quotes_preserve_offsets(&stripped_svg);
+    let tree = usvg::Tree::from_data(usvg_input.as_bytes(), &options)
         .map_err(|e| format!("failed to parse SVG: {e}"))?;
 
     if let Ok(slot) = resolver_error.lock() {
@@ -1732,7 +2364,76 @@ where
         );
     }
 
-    let css = build_css(&merged_request_to_font, &embedded);
+    let preserved_css = collect_preserved_style_css(&stripped_svg)?;
+    let emitted_faces = merged_request_to_font
+        .iter()
+        .map(|(request, path)| {
+            let font = embedded.get(path).ok_or_else(|| {
+                format!(
+                    "missing embedded font payload for emitted path: {}",
+                    path.display()
+                )
+            })?;
+            Ok((
+                synthetic_family_name(request, font),
+                request.clone(),
+                path.clone(),
+            ))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let alias_by_key = emitted_faces
+        .iter()
+        .map(|(alias, request, path)| (alias_key_for_request(request, path), alias.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut alias_descriptor_candidates =
+        BTreeMap::<(String, u16, String), BTreeSet<String>>::new();
+    for (alias, request, _) in &emitted_faces {
+        alias_descriptor_candidates
+            .entry((
+                request.style.clone(),
+                request.weight,
+                request.stretch.clone(),
+            ))
+            .or_default()
+            .insert(alias.clone());
+    }
+    let alias_by_descriptor = alias_descriptor_candidates
+        .into_iter()
+        .filter_map(|(descriptor, aliases)| {
+            if aliases.len() == 1 {
+                aliases.into_iter().next().map(|alias| (descriptor, alias))
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let normalized_svg = tree.to_string(&usvg::WriteOptions {
+        preserve_text: true,
+        ..usvg::WriteOptions::default()
+    });
+    let span_alias_lists = collect_span_alias_lists(
+        &tree,
+        &resolved_paths_snapshot,
+        &runtime_to_emit,
+        &alias_by_key,
+        &alias_by_descriptor,
+    )?;
+    let rewritten_svg = rewrite_normalized_svg_font_families(&normalized_svg, &span_alias_lists)?;
+    let preserved_defs_content = collect_preserved_defs_content(&stripped_svg, &rewritten_svg)?;
+    let rewritten_svg = if preserved_defs_content.is_empty() {
+        rewritten_svg
+    } else {
+        let insert_at = find_root_svg_open_tag_end(&rewritten_svg)
+            .ok_or_else(|| "failed to find root <svg> opening tag in normalized SVG".to_string())?;
+        inject_raw_at(
+            &rewritten_svg,
+            insert_at,
+            &format!("<defs>{preserved_defs_content}</defs>"),
+        )?
+    };
+
+    let css = build_css(&emitted_faces, &preserved_css, &embedded);
     if css.trim().is_empty() {
         return Err("no font requests were found; refusing to emit unchanged SVG".to_string());
     }
@@ -1742,7 +2443,14 @@ where
     } else {
         String::new()
     };
-    let output_svg = inject_style_block_at(&stripped_svg, root_open_end, &debug_comments, &css)?;
+    let normalized_root_open_end = find_root_svg_open_tag_end(&rewritten_svg)
+        .ok_or_else(|| "failed to find root <svg> opening tag in rewritten SVG".to_string())?;
+    let output_svg = inject_style_block_at(
+        &rewritten_svg,
+        normalized_root_open_end,
+        &debug_comments,
+        &css,
+    )?;
 
     Ok(output_svg)
 }
@@ -1916,7 +2624,8 @@ pub fn parse_svg_tree_inline_fonts_only(input_svg: &str) -> Result<usvg::Tree, S
         }),
     };
 
-    let tree = usvg::Tree::from_data(stripped_svg.as_bytes(), &options)
+    let usvg_input = normalize_inner_attribute_quotes_preserve_offsets(&stripped_svg);
+    let tree = usvg::Tree::from_data(usvg_input.as_bytes(), &options)
         .map_err(|e| format!("failed to parse SVG: {e}"))?;
 
     if let Ok(slot) = image_resolver_error.lock() {

@@ -67,6 +67,129 @@ fn svg_with_single_text(family: &str) -> String {
     )
 }
 
+fn output_font_families(svg: &str) -> Vec<String> {
+    let doc = roxmltree::Document::parse(svg).expect("output should remain valid SVG XML");
+    let mut families = Vec::new();
+
+    for node in doc.descendants().filter(|n| n.is_element()) {
+        if let Some(value) = node.attribute("font-family") {
+            families.push(value.to_string());
+        }
+
+        if let Some(style) = node.attribute("style") {
+            for declaration in style.split(';') {
+                let Some((name, value)) = declaration.split_once(':') else {
+                    continue;
+                };
+                if name.trim() == "font-family" {
+                    families.push(value.trim().to_string());
+                }
+            }
+        }
+    }
+
+    families
+}
+
+fn output_font_face_families(svg: &str) -> Vec<String> {
+    let doc = roxmltree::Document::parse(svg).expect("output should remain valid SVG XML");
+    let mut families = Vec::new();
+
+    for style_node in doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "style")
+    {
+        let css = style_node.text().unwrap_or("");
+        let stylesheet = StyleSheet::parse(css, ParserOptions::default())
+            .expect("output style content should be valid CSS");
+
+        for rule in &stylesheet.rules.0 {
+            if let CssRule::FontFace(font_face) = rule {
+                let serialized = font_face
+                    .to_css_string(PrinterOptions::default())
+                    .expect("@font-face should serialize");
+                if let Some((_, tail)) = serialized.split_once("font-family:") {
+                    if let Some((family, _)) = tail.split_once(';') {
+                        families.push(family.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    families
+}
+
+fn assert_output_omits_family_name(svg: &str, family: &str) {
+    let lowered = family.to_ascii_lowercase();
+    for value in output_font_families(svg) {
+        assert!(
+            !value.to_ascii_lowercase().contains(&lowered),
+            "did not expect family '{family}' in output font-family value: {value}"
+        );
+    }
+
+    for value in output_font_face_families(svg) {
+        assert!(
+            !value.to_ascii_lowercase().contains(&lowered),
+            "did not expect family '{family}' in output @font-face family: {value}"
+        );
+    }
+}
+
+fn assert_all_output_font_families_are_synthetic(svg: &str) {
+    let family_values = output_font_families(svg);
+    assert!(
+        !family_values.is_empty(),
+        "expected output to contain at least one font-family declaration"
+    );
+
+    for value in family_values {
+        let normalized = value.to_ascii_lowercase();
+        assert!(
+            !normalized.contains("sans-serif")
+                && !normalized.contains("serif")
+                && !normalized.contains("monospace")
+                && !normalized.contains("fonta")
+                && !normalized.contains("fontb")
+                && !normalized.contains("fontc"),
+            "expected synthetic-only font-family value, got: {value}"
+        );
+    }
+
+    let font_face_families = output_font_face_families(svg);
+    assert!(
+        !font_face_families.is_empty(),
+        "expected output to contain at least one @font-face family"
+    );
+
+    for value in font_face_families {
+        let normalized = value.to_ascii_lowercase();
+        assert!(
+            !normalized.contains("sans-serif")
+                && !normalized.contains("serif")
+                && !normalized.contains("monospace")
+                && !normalized.contains("fonta")
+                && !normalized.contains("fontb")
+                && !normalized.contains("fontc"),
+            "expected synthetic-only @font-face family, got: {value}"
+        );
+    }
+}
+
+fn assert_output_omits_family_names(svg: &str, families: &[&str]) {
+    for family in families {
+        assert_output_omits_family_name(svg, family);
+    }
+}
+
+fn assert_output_has_no_local_font_src(svg: &str) {
+    assert!(
+        !svg.to_ascii_lowercase().contains("local("),
+        "did not expect local() source in output: {svg}"
+    );
+}
+
 #[test]
 fn resolver_receives_explicit_text_style_arguments() {
     let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="60">
@@ -550,6 +673,472 @@ fn second_run_does_not_call_resolver_when_fonts_are_already_inlined() {
         0,
         "resolver should not be called when all fonts are already available"
     );
+}
+
+#[test]
+fn generic_sans_serif_family_is_removed_from_output_everywhere() {
+    let svg = svg_with_single_text("sans-serif");
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert!(output.contains("@font-face"));
+    assert_output_omits_family_name(&output, "sans-serif");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn inherited_root_family_is_removed_from_output_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60" font-family="sans-serif"><text x="10" y="40">A</text></svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert!(output.contains("@font-face"));
+    assert_output_omits_family_name(&output, "sans-serif");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn group_attribute_family_inheritance_is_rewritten_to_synthetic_output() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60">
+  <g font-family="sans-serif"><text x="10" y="40">A</text></g>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "sans-serif");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn group_inline_style_family_inheritance_is_rewritten_to_synthetic_output() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60">
+  <g style="font-family: sans-serif"><text x="10" y="40">A</text></g>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "sans-serif");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn group_css_family_inheritance_is_rewritten_to_synthetic_output() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="60">
+  <defs>
+    <style><![CDATA[
+      g.outer { font-family: sans-serif; }
+    ]]></style>
+  </defs>
+  <g class="outer"><text x="10" y="40">A</text></g>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "sans-serif");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn css_originated_family_is_removed_from_output_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60">
+  <defs>
+    <style><![CDATA[
+      .label {
+        font-family: sans-serif;
+        fill: #cc0000;
+      }
+    ]]></style>
+  </defs>
+  <text class="label" x="10" y="40">A</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert!(output.contains("@font-face"));
+    assert_output_omits_family_name(&output, "sans-serif");
+    assert_all_output_font_families_are_synthetic(&output);
+    assert!(output.contains("#cc0000") || output.contains("fill="));
+}
+
+#[test]
+fn nested_tspan_families_are_removed_from_output_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="70">
+  <text x="10" y="40" font-family="'FontA'">A<tspan font-family="'FontB'">A</tspan></text>
+</svg>"#;
+    let font_a_path = fixture_font_path("font-a.ttf");
+    let font_b_path = fixture_font_path("font-b.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| {
+        if query.families.iter().any(|f| f == "FontA") {
+            return Ok(font_a_path.clone());
+        }
+        if query.families.iter().any(|f| f == "FontB") {
+            return Ok(font_b_path.clone());
+        }
+        Err(format!("unexpected families: {:?}", query.families))
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "FontA");
+    assert_output_omits_family_name(&output, "FontB");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn textpath_family_is_removed_from_output_everywhere() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120">
+  <defs>
+    <path id="track" d="M10 80 C 60 10, 180 10, 230 80"/>
+  </defs>
+  <text font-family="sans-serif">
+    <textPath href="#track">A</textPath>
+  </text>
+</svg>"##;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "sans-serif");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn inline_style_family_is_removed_from_output_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60">
+  <text x="10" y="40" style="font-family: sans-serif; fill: #00aa00">A</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "sans-serif");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn font_shorthand_family_is_removed_from_output_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60">
+  <text x="10" y="40" style="font: italic 700 20px sans-serif; fill: #00aa00">A</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "sans-serif");
+    assert_all_output_font_families_are_synthetic(&output);
+    assert!(output.contains("font-style") || output.contains("italic"));
+    assert!(output.contains("font-weight") || output.contains("700"));
+}
+
+#[test]
+fn family_list_is_fully_rewritten_without_preserving_original_names() {
+    let svg = svg_with_single_text("'Font A',sans-serif");
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_names(&output, &["Font A", "sans-serif"]);
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn single_span_fallback_chain_removes_original_family_names_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><text x="10" y="40" font-family="'FontA'">AB</text></svg>"#;
+    let font_a_path = fixture_font_path("font-a.ttf");
+    let font_b_path = fixture_font_path("font-b.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| match query.missing_char {
+        None => Ok(font_a_path.clone()),
+        Some('B') => Ok(font_b_path.clone()),
+        Some(other) => Err(format!("unexpected fallback char: {other}")),
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "FontA");
+    assert_all_output_font_families_are_synthetic(&output);
+    assert!(output.matches("@font-face").count() >= 2);
+}
+
+#[test]
+fn sibling_spans_with_different_fallback_needs_remove_original_names_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="80">
+  <text x="10" y="40" font-family="'FontA'">A<tspan>B</tspan></text>
+</svg>"#;
+    let font_a_path = fixture_font_path("font-a.ttf");
+    let font_b_path = fixture_font_path("font-b.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| match query.missing_char {
+        None => Ok(font_a_path.clone()),
+        Some('B') => Ok(font_b_path.clone()),
+        Some(other) => Err(format!("unexpected fallback char: {other}")),
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "FontA");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn spans_sharing_same_primary_font_still_remove_original_names_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="80">
+  <text x="10" y="40" font-family="'FontA'">A<tspan>A</tspan></text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "FontA");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn textpath_with_own_family_and_nested_tspan_removes_all_original_names() {
+    let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="260" height="120">
+  <defs>
+    <path id="track2" d="M10 80 C 60 10, 180 10, 230 80"/>
+  </defs>
+  <text>
+    <textPath href="#track2" font-family="'FontA'">A<tspan font-family="'FontB'">A</tspan></textPath>
+  </text>
+</svg>"##;
+    let font_a_path = fixture_font_path("font-a.ttf");
+    let font_b_path = fixture_font_path("font-b.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| {
+        if query.families.iter().any(|f| f == "FontA") {
+            return Ok(font_a_path.clone());
+        }
+        if query.families.iter().any(|f| f == "FontB") {
+            return Ok(font_b_path.clone());
+        }
+        Err(format!("unexpected families: {:?}", query.families))
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_names(&output, &["FontA", "FontB"]);
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn css_nested_text_scopes_remove_all_original_names() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="260" height="80">
+  <defs>
+    <style><![CDATA[
+      .outer { font-family: 'FontA'; }
+      .inner { font-family: 'FontB'; }
+    ]]></style>
+  </defs>
+  <text class="outer" x="10" y="40">A<tspan class="inner">A</tspan></text>
+</svg>"#;
+    let font_a_path = fixture_font_path("font-a.ttf");
+    let font_b_path = fixture_font_path("font-b.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| {
+        if query.families.iter().any(|f| f == "FontA") {
+            return Ok(font_a_path.clone());
+        }
+        if query.families.iter().any(|f| f == "FontB") {
+            return Ok(font_b_path.clone());
+        }
+        Err(format!("unexpected families: {:?}", query.families))
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_names(&output, &["FontA", "FontB"]);
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn unused_root_family_is_still_removed_from_output_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="60" font-family="'FontA'">
+  <text x="10" y="40" font-family="'FontB'">A</text>
+</svg>"#;
+    let font_a_path = fixture_font_path("font-a.ttf");
+    let font_b_path = fixture_font_path("font-b.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| {
+        if query.families.iter().any(|f| f == "FontA") {
+            return Ok(font_a_path.clone());
+        }
+        if query.families.iter().any(|f| f == "FontB") {
+            return Ok(font_b_path.clone());
+        }
+        Err(format!("unexpected families: {:?}", query.families))
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_names(&output, &["FontA", "FontB"]);
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn existing_embedded_font_face_family_is_rewritten_to_synthetic_name() {
+    let data_url = fixture_data_url("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'EmbeddedFamily';
+        font-style: normal;
+        font-weight: 400;
+        src: url({data_url}) format('truetype');
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'EmbeddedFamily'">A</text>
+</svg>"#
+    );
+
+    let output = embed_svg_fonts(&svg, |_query| {
+        Err("resolver should not be needed when embedded data source is present".to_string())
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "EmbeddedFamily");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn second_run_keeps_output_free_of_original_family_names() {
+    let svg = svg_with_single_text("sans-serif");
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let out1 = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+        .expect("first embedding should succeed");
+    let out2 = embed_svg_fonts(&out1, move |_query| Ok(fixture_font_path("font-a.ttf")))
+        .expect("second embedding should succeed");
+
+    assert_output_omits_family_names(&out2, &["sans-serif", "FontA", "FontB", "FontC"]);
+    assert_all_output_font_families_are_synthetic(&out2);
+}
+
+#[test]
+fn no_explicit_source_family_still_yields_synthetic_output_family() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><text x="10" y="40">A</text></svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn quoted_family_names_are_removed_from_output_everywhere() {
+    let svg = svg_with_single_text("'Font A'");
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "Font A");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn generic_serif_and_monospace_families_are_removed_from_output_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="90">
+  <text x="10" y="30" font-family="serif">A</text>
+  <text x="10" y="70" font-family="monospace">A</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_names(&output, &["serif", "monospace"]);
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn duplicate_text_content_across_spans_removes_original_names_everywhere() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="80">
+  <text x="10" y="40" font-family="'FontA'">A<tspan font-family="'FontB'">A</tspan></text>
+</svg>"#;
+    let font_a_path = fixture_font_path("font-a.ttf");
+    let font_b_path = fixture_font_path("font-b.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| {
+        if query.families.iter().any(|f| f == "FontA") {
+            return Ok(font_a_path.clone());
+        }
+        if query.families.iter().any(|f| f == "FontB") {
+            return Ok(font_b_path.clone());
+        }
+        Err(format!("unexpected families: {:?}", query.families))
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_names(&output, &["FontA", "FontB"]);
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn empty_tspan_structure_still_removes_original_family_names() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="80">
+  <text x="10" y="40" font-family="'FontA'"><tspan></tspan>A</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "FontA");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn output_wide_invariant_removes_original_and_generic_families_and_local_src() {
+    let font_path = fixture_font_path("font-a.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="280" height="100" font-family="sans-serif">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'EmbeddedOld';
+        font-style: normal;
+        font-weight: 400;
+        src: local('Definitely Missing Font'), url({}) format('truetype');
+      }}
+
+      .css-family {{
+        font-family: serif;
+      }}
+    ]]></style>
+  </defs>
+  <text class="css-family" x="10" y="30">A</text>
+  <text x="10" y="70" font-family="'EmbeddedOld', monospace">A</text>
+</svg>"#,
+        fixture_data_url("font-a.ttf")
+    );
+
+    let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_names(
+        &output,
+        &["sans-serif", "serif", "monospace", "EmbeddedOld"],
+    );
+    assert_all_output_font_families_are_synthetic(&output);
+    assert_output_has_no_local_font_src(&output);
 }
 
 #[test]
@@ -1543,6 +2132,68 @@ fn style_with_font_face_and_other_rules_preserves_non_font_rules() {
 }
 
 #[test]
+fn nested_media_rule_removes_font_family_but_preserves_non_font_rules() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @media screen {
+        .label {
+          font-family: sans-serif;
+          fill: #0088cc;
+        }
+      }
+    ]]></style>
+  </defs>
+  <text class="label" x="10" y="40">A</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "sans-serif");
+    let doc = roxmltree::Document::parse(&output).expect("output should remain valid SVG XML");
+    let css = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "style")
+        .and_then(|n| n.text())
+        .expect("expected output style block");
+    assert!(css.contains("@media screen"));
+    assert!(css.contains("#0088cc") || css.contains("#08c"));
+}
+
+#[test]
+fn nested_supports_rule_removes_font_shorthand_but_preserves_non_font_rules() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
+  <defs>
+    <style><![CDATA[
+      @supports (display: block) {
+        .label {
+          font: italic 700 16px sans-serif;
+          stroke: #333333;
+        }
+      }
+    ]]></style>
+  </defs>
+  <text class="label" x="10" y="40">A</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "sans-serif");
+    let doc = roxmltree::Document::parse(&output).expect("output should remain valid SVG XML");
+    let css = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "style")
+        .and_then(|n| n.text())
+        .expect("expected output style block");
+    assert!(css.contains("@supports"));
+    assert!(css.contains("#333333") || css.contains("#333"));
+}
+
+#[test]
 fn defs_with_non_style_content_is_preserved_when_font_face_only_style_is_removed() {
     let data_url = fixture_data_url("font-a.ttf");
     let svg = format!(
@@ -1823,6 +2474,209 @@ fn unicode_range_multiple_faces_same_descriptor_are_merged_deterministically() {
     assert!(
         decoded.iter().any(|bytes| bytes == &font_c_bytes),
         "expected merged output to include payload with full ABC coverage"
+    );
+}
+
+#[test]
+fn same_descriptor_subset_faces_still_remove_original_family_names() {
+    let font_b_data = fixture_data_url("font-b.ttf");
+    let font_c_data = fixture_data_url("font-c.ttf");
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="260" height="80">
+  <defs>
+    <style><![CDATA[
+      @font-face {{
+        font-family: 'SubsetAlias';
+        font-style: normal;
+        font-weight: 400;
+        src: url({font_b_data}) format('truetype');
+        unicode-range: U+0041-0042;
+      }}
+      @font-face {{
+        font-family: 'SubsetAlias';
+        font-style: normal;
+        font-weight: 400;
+        src: url({font_c_data}) format('truetype');
+        unicode-range: U+0043;
+      }}
+    ]]></style>
+  </defs>
+  <text x="10" y="40" font-family="'SubsetAlias'">ABC</text>
+</svg>"#
+    );
+
+    let output = embed_svg_fonts(&svg, |_query| {
+        Err("resolver should not be needed when embedded subset faces cover all glyphs".to_string())
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "SubsetAlias");
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn multi_chunk_text_keeps_correct_family_ordering_after_normalized_rewrite() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="260" height="120">
+  <text x="10" y="20" font-family="'FontA'">
+    <tspan x="10" y="30">A</tspan>
+    <tspan x="10" y="60" font-family="'FontB'">A</tspan>
+    <tspan x="10" y="90" font-family="sans-serif">A</tspan>
+  </text>
+</svg>"#;
+    let font_a_path = fixture_font_path("font-a.ttf");
+    let font_b_path = fixture_font_path("font-b.ttf");
+    let font_c_path = fixture_font_path("font-c.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| {
+        if query.families.iter().any(|f| f == "FontA") {
+            return Ok(font_a_path.clone());
+        }
+        if query.families.iter().any(|f| f == "FontB") {
+            return Ok(font_b_path.clone());
+        }
+        if query.families.iter().any(|f| f == "sans-serif") {
+            return Ok(font_c_path.clone());
+        }
+        Err(format!("unexpected families: {:?}", query.families))
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_names(&output, &["FontA", "FontB", "sans-serif"]);
+    assert_all_output_font_families_are_synthetic(&output);
+    assert!(
+        output.matches("font-family=").count() >= 3,
+        "expected multiple rewritten span families in normalized output"
+    );
+}
+
+#[test]
+fn malformed_raw_angle_bracket_in_attribute_value_is_tolerated() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="60">
+  <g id="link_initial_<b>unsafe" font-family="sans-serif"><text x="10" y="40">A</text></g>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed for malformed-but-sanitizable attribute values");
+
+    assert!(!output.contains("sans-serif"));
+    assert!(output.contains("@font-face"));
+}
+
+#[test]
+fn ligature_like_text_keeps_synthetic_family_output() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="60">
+  <text x="10" y="40" font-family="sans-serif">fi</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed with ligature-like text");
+
+    assert!(!output.contains("sans-serif"));
+    assert!(output.contains("@font-face"));
+}
+
+#[test]
+fn rtl_text_keeps_synthetic_family_output() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="60">
+  <text x="10" y="40" font-family="sans-serif" direction="rtl" unicode-bidi="bidi-override">AB</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-b.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed with rtl text settings");
+
+    assert!(!output.contains("sans-serif"));
+    assert!(output.contains("@font-face"));
+}
+
+#[test]
+fn multiple_style_blocks_preserve_non_font_rules_and_remove_original_families() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="80">
+  <defs>
+    <style><![CDATA[
+      .a { font-family: sans-serif; }
+    ]]></style>
+    <style><![CDATA[
+      @media screen {
+        .b { fill: #123456; }
+      }
+    ]]></style>
+  </defs>
+  <text class="a b" x="10" y="40">A</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "sans-serif");
+    let doc = roxmltree::Document::parse(&output).expect("output should remain valid SVG XML");
+    let style_blocks = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "style")
+        .filter_map(|n| n.text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(style_blocks.contains("#123456") || style_blocks.contains("#123456"));
+}
+
+#[test]
+fn same_descriptor_different_text_nodes_can_have_different_fallback_needs() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="90">
+  <text x="10" y="30" font-family="'FontA'">A</text>
+  <text x="10" y="70" font-family="'FontA'">B</text>
+</svg>"#;
+    let font_a_path = fixture_font_path("font-a.ttf");
+    let font_b_path = fixture_font_path("font-b.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| match query.missing_char {
+        None => Ok(font_a_path.clone()),
+        Some('B') => Ok(font_b_path.clone()),
+        Some(other) => Err(format!("unexpected fallback char: {other}")),
+    })
+    .expect("embedding should succeed");
+
+    assert_output_omits_family_name(&output, "FontA");
+    assert_all_output_font_families_are_synthetic(&output);
+    assert!(output.matches("@font-face").count() >= 2);
+}
+
+#[test]
+fn emoji_zwj_sequence_without_coverage_returns_clear_error() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="260" height="60">
+  <text x="10" y="40" font-family="sans-serif">&#x1F468;&#x200D;&#x1F469;&#x200D;&#x1F467;</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    match embed_svg_fonts(svg, move |_query| Ok(font_path.clone())) {
+        Ok(output) => {
+            assert!(output.contains("@font-face"));
+            assert!(!output.contains("sans-serif"));
+        }
+        Err(err) => {
+            assert!(
+                err.contains("missing_char")
+                    || err.contains("failed to map normalized span fallback request"),
+                "expected explicit fallback-mapping failure, got: {err}"
+            );
+        }
+    }
+}
+
+#[test]
+fn variation_selector_or_combining_mark_without_coverage_returns_clear_error() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="240" height="60">
+  <text x="10" y="40" font-family="sans-serif">A&#x0301;</text>
+</svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let err = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect_err("unsupported combining-mark sequence should currently fail clearly");
+    assert!(
+        err.contains("failed to map normalized span fallback request"),
+        "expected explicit fallback-mapping failure, got: {err}"
     );
 }
 

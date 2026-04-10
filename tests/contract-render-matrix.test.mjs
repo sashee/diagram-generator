@@ -117,38 +117,6 @@ visitor --> api: ...execute-api.amazonaws.com
 @enduml
 `,
     },
-    {
-      name: "salt-security-checklist",
-      code: `
-@startuml
-
-(*) --> "
-{{
-salt
-{
-<b>Security checklist
-~~
-[] Data encrypted?
-~~
-}
-}}
-" as initial
-
-initial -down->[Enable SSE-S3] "
-{{
-salt
-{
-<b>Security checklist
-~~
-[X] Data encrypted?
-~~
-}
-}}
-"
-
-@enduml
-`,
-    },
   ],
   recharts: [
     {
