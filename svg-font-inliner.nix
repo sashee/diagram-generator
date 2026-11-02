@@ -32,6 +32,7 @@ pkgs.rustPlatform.buildRustPackage {
     mv $out/bin/svg-font-inliner $out/bin/.svg-font-inliner-real
 
     makeWrapper ${sandbox_run}/bin/sandbox-run $out/bin/svg-font-inliner \
+      --add-flags "--keep-env SVG_FONT_EMBED_DEBUG --keep-env FONTCONFIG_FILE --keep-env PYFTSUBSET_BIN" \
       --add-flags -- \
       --add-flags $out/bin/.svg-font-inliner-real \
       --set SVG_FONT_EMBED_DEBUG ${if debug then "1" else "0"} \

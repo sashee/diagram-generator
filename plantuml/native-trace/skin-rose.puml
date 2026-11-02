@@ -1,0 +1,4 @@
+@startuml
+skin rose
+class Alpha
+@enduml

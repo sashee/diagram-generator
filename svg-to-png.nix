@@ -50,6 +50,7 @@ pkgs.rustPlatform.buildRustPackage {
   postFixup = ''
     mv $out/bin/svg-to-png $out/bin/.svg-to-png-real
     makeWrapper ${sandbox_run}/bin/sandbox-run $out/bin/svg-to-png \
+      --add-flags "--keep-env SVG_FONT_EMBED_DEBUG" \
       --add-flags -- \
       --set SVG_FONT_EMBED_DEBUG ${if debug then "1" else "0"} \
       --add-flags $out/bin/.svg-to-png-real

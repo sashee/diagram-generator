@@ -1,0 +1,3 @@
+@startuml
+:<math>int_0^1f(x)dx</math>;
+@enduml

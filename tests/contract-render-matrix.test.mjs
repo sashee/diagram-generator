@@ -9,13 +9,7 @@ import {
   writeBytesArtifact,
 } from "./_helpers.mjs";
 
-const sampleCodeByEngine = {
-  plantuml: [
-    {
-      name: "table",
-      code: `
-@startuml
-digraph a {
+const tableDigraph = `digraph a {
 node [shape=plain,penwidth="0",fontname = "monospace"]
 Table [label=<
 <table border="0" cellborder="1" cellspacing="0">
@@ -43,8 +37,45 @@ Counts [label=<
 <td bgcolor="#90EE90"><s>1</s><br/>2</td>
 </tr>
 </table>>];
-}
+}`;
 
+// v1.2026.9 rejects a digraph inside @startuml and asks for @startdot, the v1.2025 versions accept it
+const plantumlRequiresStartDot = (renderer) => {
+  const [major = 0, minor = 0] = (renderer.match(/^plantuml-v(\d+)\.(\d+)\./) ?? []).slice(1).map(Number);
+  return major > 1 || (major === 1 && minor >= 2026);
+};
+
+const sampleCodeByEngine = {
+  plantuml: [
+    {
+      name: "table",
+      supports: (renderer) => !plantumlRequiresStartDot(renderer),
+      expectedSvgText: "Users table",
+      code: `
+@startuml
+${tableDigraph}
+
+@enduml
+`,
+    },
+    {
+      name: "table",
+      supports: plantumlRequiresStartDot,
+      expectedSvgText: "Users table",
+      code: `
+@startdot
+${tableDigraph}
+
+@enddot
+`,
+    },
+    {
+      // PlantUML writes entity names into comments, the font inliner must not mistake their quotes for markup
+      name: "class-name-in-comment",
+      expectedSvgText: "Key",
+      code: `
+@startuml
+class "Map>Key<Bob's"
 @enduml
 `,
     },
@@ -194,8 +225,9 @@ const jobs = [];
 for (const { renderer, formats } of plantumlRenderers) {
   assert(formats.includes("svg"), `${renderer}: expected svg support`);
   assert(formats.includes("png"), `${renderer}: expected png support`);
-  for (const { name, code } of sampleCodeByEngine.plantuml) {
-    jobs.push({ renderer, name, code, format: "svg" });
+  const samples = sampleCodeByEngine.plantuml.filter(({ supports = () => true }) => supports(renderer));
+  for (const { name, code, expectedSvgText } of samples) {
+    jobs.push({ renderer, name, code, expectedSvgText, format: "svg" });
     jobs.push({ renderer, name, code, format: "png" });
   }
 }
@@ -238,7 +270,7 @@ const runWithConcurrency = async (items, limit, worker) => {
   await Promise.all(workers);
 };
 
-await runWithConcurrency(jobs, 5, async ({ renderer, name, code, format }) => {
+await runWithConcurrency(jobs, 5, async ({ renderer, name, code, expectedSvgText, format }) => {
   const startedAt = Date.now();
   console.log(`Starting render, ${renderer}, ${name}, ${format}`);
   const context = `${renderer}/${name}/${format}`;
@@ -290,6 +322,9 @@ await runWithConcurrency(jobs, 5, async ({ renderer, name, code, format }) => {
     const svg = assertSingleSuccessfulOutput({ item: parsed[0], renderer, format: "svg" });
     assert(svg.includes("<svg"), `${renderer}: expected <svg in output`);
     assert(svg.includes("</svg>"), `${renderer}: expected </svg> in output`);
+    if (expectedSvgText) {
+      assert(svg.includes(expectedSvgText), `${renderer}: expected "${expectedSvgText}" in the ${name} svg`);
+    }
     await writeArtifact(`${prefix}.svg`, svg);
     const parseAssertMs = Date.now() - parseAssertStart;
 

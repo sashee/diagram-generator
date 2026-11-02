@@ -1,0 +1,6 @@
+@startuml
+!pragma layout elk
+class Alpha
+class Beta
+Alpha --> Beta
+@enduml

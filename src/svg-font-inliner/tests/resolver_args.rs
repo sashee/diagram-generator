@@ -2746,3 +2746,25 @@ fn unicode_range_fallback_chain_is_idempotent() {
     );
     assert_eq!(out1, out2, "fallback-chain output should be idempotent");
 }
+
+#[test]
+fn single_quoted_font_family_with_double_quotes_is_accepted() {
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><text x="10" y="40" font-family='"FontA", sans-serif'>A</text><rect width="1" height="1"/></svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+    assert!(output.contains("@font-face"));
+    assert_all_output_font_families_are_synthetic(&output);
+}
+
+#[test]
+fn comment_with_angle_brackets_and_apostrophe_is_accepted() {
+    // PlantUML writes entity names into comments, e.g. for class "Map>Key<Bob's"
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><!--class Map>Key<Bob's--><text x="10" y="40" font-family="'FontA'">A</text></svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+    assert!(output.contains("@font-face"));
+}

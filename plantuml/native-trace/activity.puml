@@ -1,0 +1,9 @@
+@startuml
+start
+if (ready?) then (yes)
+  :work;
+else (no)
+  :wait;
+endif
+stop
+@enduml

@@ -148,13 +148,18 @@ fn apply_seccomp_network_block() -> Result<(), String> {
         "getpeername",
         "setsockopt",
         "getsockopt",
+        // io_uring runs socket operations (socket, connect, sendmsg, ...) without the syscalls above,
+        // so seccomp can't see them. Landlock only covers TCP below ABI 9 (UNIX sockets) and 10 (UDP)
+        "io_uring_setup",
+        "io_uring_enter",
+        "io_uring_register",
     ];
 
     for name in denied {
-        let syscall = match ScmpSyscall::from_name(name) {
-            Ok(syscall) => syscall,
-            Err(_) => continue,
-        };
+        // fail closed: skipping an unknown name (e.g. with an older libseccomp) would silently drop the rule
+        let syscall = ScmpSyscall::from_name(name).map_err(|e| {
+            format!("failed to resolve syscall '{name}' for the seccomp filter: {e}")
+        })?;
 
         filter
             .add_rule(ScmpAction::Errno(1), syscall)
@@ -200,4 +205,131 @@ fn main() {
 
     let err = Command::new(&command).args(rest).exec();
     fail(format!("failed to exec '{}': {err}", command));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::ErrorKind;
+    use std::net::{TcpListener, TcpStream, UdpSocket};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::thread;
+
+    // Runs `attempt` on a new thread, sandboxed like the worker's command. Capabilities, no_new_privs, Landlock and
+    // seccomp all apply per thread, so the test thread stays unrestricted and can check what reached its listeners.
+    fn sandboxed<T: Send + 'static>(attempt: impl FnOnce() -> T + Send + 'static) -> T {
+        let private_tmp_dir = tempfile::tempdir().expect("should create private temp dir");
+        let private_tmp_path = private_tmp_dir.path().to_path_buf();
+        thread::spawn(move || {
+            harden_process_privileges().expect("should harden privileges");
+            apply_landlock(&private_tmp_path).expect("should apply Landlock");
+            apply_seccomp_network_block().expect("should load seccomp filter");
+            attempt()
+        })
+        .join()
+        .expect("sandboxed thread should not panic")
+    }
+
+    fn arrived<T>(result: std::io::Result<T>) -> bool {
+        match result {
+            Ok(_) => true,
+            Err(err) if err.kind() == ErrorKind::WouldBlock => false,
+            Err(err) => panic!("listener failed: {err}"),
+        }
+    }
+
+    #[test]
+    fn tcp_connections_are_blocked() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("should bind TCP listener");
+        listener
+            .set_nonblocking(true)
+            .expect("should make listener nonblocking");
+        let addr = listener.local_addr().expect("should get listener address");
+
+        TcpStream::connect(addr).expect("should connect outside the sandbox");
+        assert!(
+            arrived(listener.accept()),
+            "control connection should arrive"
+        );
+
+        let result = sandboxed(move || TcpStream::connect(addr).map(|_| ()));
+        assert!(result.is_err(), "TCP connect should fail in the sandbox");
+        assert!(
+            !arrived(listener.accept()),
+            "TCP connection from the sandbox reached the listener"
+        );
+    }
+
+    #[test]
+    fn udp_datagrams_are_blocked() {
+        let receiver = UdpSocket::bind("127.0.0.1:0").expect("should bind UDP receiver");
+        receiver
+            .set_nonblocking(true)
+            .expect("should make receiver nonblocking");
+        let addr = receiver.local_addr().expect("should get receiver address");
+        let send =
+            move || UdpSocket::bind("127.0.0.1:0").and_then(|socket| socket.send_to(b"leak", addr));
+        let mut buf = [0u8; 16];
+
+        send().expect("should send outside the sandbox");
+        assert!(
+            arrived(receiver.recv_from(&mut buf)),
+            "control datagram should arrive"
+        );
+
+        let result = sandboxed(send);
+        assert!(result.is_err(), "UDP send should fail in the sandbox");
+        assert!(
+            !arrived(receiver.recv_from(&mut buf)),
+            "UDP datagram from the sandbox reached the receiver"
+        );
+    }
+
+    #[test]
+    fn unix_socket_connections_are_blocked() {
+        let socket_dir = tempfile::tempdir().expect("should create socket dir");
+        let path = socket_dir.path().join("listener.sock");
+        let listener = UnixListener::bind(&path).expect("should bind UNIX listener");
+        listener
+            .set_nonblocking(true)
+            .expect("should make listener nonblocking");
+
+        UnixStream::connect(&path).expect("should connect outside the sandbox");
+        assert!(
+            arrived(listener.accept()),
+            "control connection should arrive"
+        );
+
+        let result = sandboxed(move || UnixStream::connect(path).map(|_| ()));
+        assert!(
+            result.is_err(),
+            "UNIX socket connect should fail in the sandbox"
+        );
+        assert!(
+            !arrived(listener.accept()),
+            "UNIX socket connection from the sandbox reached the listener"
+        );
+    }
+
+    // io_uring can create sockets, connect and send without the syscalls the seccomp filter denies
+    #[test]
+    fn io_uring_is_blocked() {
+        if let Err(err) = io_uring::IoUring::new(8) {
+            eprintln!(
+                "skipping: io_uring is unavailable on this host even without the sandbox ({err})"
+            );
+            return;
+        }
+
+        let result = sandboxed(|| {
+            io_uring::IoUring::new(8)
+                .err()
+                .map(|err| err.raw_os_error())
+        });
+        assert_eq!(
+            result,
+            Some(Some(1)),
+            "io_uring_setup should fail with EPERM in the sandbox"
+        );
+    }
 }

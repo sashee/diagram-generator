@@ -3,6 +3,7 @@
 		(import ./plantuml/v1.2025.3.nix)
 		(import ./plantuml/v1.2025.4.nix)
 		(import ./plantuml/v1.2025.7.nix)
+		(import ./plantuml/v1.2026.9.nix)
 	];
 
 	recharts = [

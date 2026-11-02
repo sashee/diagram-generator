@@ -76,7 +76,12 @@ EOF
 ;;
     *)
 
-${sandbox_run}/bin/sandbox-run -- ${diagram_generator_rs}/bin/diagram-generator-rs "$@"
+${sandbox_run}/bin/sandbox-run \
+	--keep-env AVAILABLE_RENDERERS \
+	--keep-env FONTCONFIG_FILE \
+	--keep-env SVG_FONT_EMBED_DEBUG \
+	--keep-env PYFTSUBSET_BIN \
+	-- ${diagram_generator_rs}/bin/diagram-generator-rs "$@"
 
 ;;
 esac

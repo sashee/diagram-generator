@@ -178,12 +178,12 @@ fn find_tag_end_outside_quotes(fragment: &str) -> Option<usize> {
     None
 }
 
-fn is_svg_local_name(name: &[u8]) -> bool {
-    let local = match name.rsplit(|b| *b == b':').next() {
+fn is_svg_local_name(name: &str) -> bool {
+    let local = match name.rsplit(':').next() {
         Some(value) => value,
         None => name,
     };
-    local.eq_ignore_ascii_case(b"svg")
+    local.eq_ignore_ascii_case("svg")
 }
 
 fn find_doctype_range_before_root_svg(svg: &str) -> Result<Option<(usize, usize)>, String> {
@@ -1753,51 +1753,85 @@ fn escape_inner_quotes_in_font_family_attrs(svg: &str) -> String {
     out
 }
 
+// Comments, CDATA sections, processing instructions and declarations are copied unchanged up to their own
+// terminator: their content is not markup, so quotes or angle brackets in it must not change the parsing state
+fn markup_declaration_len(rest: &[u8]) -> Option<usize> {
+    let (opener, terminator): (&[u8], &[u8]) = if rest.starts_with(b"<!--") {
+        (b"<!--", b"-->")
+    } else if rest.starts_with(b"<![CDATA[") {
+        (b"<![CDATA[", b"]]>")
+    } else if rest.starts_with(b"<?") {
+        (b"<?", b"?>")
+    } else if rest.starts_with(b"<!") {
+        (b"<!", b">")
+    } else {
+        return None;
+    };
+    let body = &rest[opener.len()..];
+    let body_len = body
+        .windows(terminator.len())
+        .position(|window| window == terminator)
+        .map_or(body.len(), |pos| pos + terminator.len());
+    Some(opener.len() + body_len)
+}
+
+// The quote fix-up is only for SVGs with malformed attribute quoting, valid documents are passed through unchanged
+fn normalize_quotes_if_unparsable(svg: &str) -> Cow<'_, str> {
+    match roxmltree::Document::parse(svg) {
+        Ok(_) => Cow::Borrowed(svg),
+        Err(_) => Cow::Owned(normalize_inner_attribute_quotes_preserve_offsets(svg)),
+    }
+}
+
 fn normalize_inner_attribute_quotes_preserve_offsets(svg: &str) -> String {
     let bytes = svg.as_bytes();
-    let mut out = String::with_capacity(svg.len());
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0usize;
     let mut in_tag = false;
     let mut in_double_quote = false;
-    let mut in_special = false;
+    let mut in_single_quote = false;
 
     while i < bytes.len() {
         if !in_tag {
+            if let Some(len) = markup_declaration_len(&bytes[i..]) {
+                out.extend_from_slice(&bytes[i..i + len]);
+                i += len;
+                continue;
+            }
             if bytes[i] == b'<' {
                 in_tag = true;
-                in_special = bytes.get(i + 1).copied() == Some(b'!')
-                    || bytes.get(i + 1).copied() == Some(b'?');
             }
-            out.push(bytes[i] as char);
+            out.push(bytes[i]);
             i += 1;
             continue;
         }
 
         let b = bytes[i];
-        if in_special {
-            out.push(b as char);
-            if b == b'>' {
-                in_tag = false;
-                in_special = false;
-            }
-            i += 1;
-            continue;
-        }
 
         if in_double_quote {
             if b == b'"' {
                 let next = bytes.get(i + 1).copied();
                 let is_closing = next.is_none()
                     || next.is_some_and(|n| n.is_ascii_whitespace() || n == b'/' || n == b'>');
-                out.push(if is_closing { '"' } else { '\'' });
+                out.push(if is_closing { b'"' } else { b'\'' });
                 if is_closing {
                     in_double_quote = false;
                 }
             } else if b == b'<' {
-                out.push('.');
+                out.push(b'.');
             } else {
-                out.push(b as char);
+                out.push(b);
             }
+            i += 1;
+            continue;
+        }
+
+        // a single-quoted value can contain double quotes, and only its closing quote can be a single quote
+        if in_single_quote {
+            if b == b'\'' {
+                in_single_quote = false;
+            }
+            out.push(if b == b'<' { b'.' } else { b });
             i += 1;
             continue;
         }
@@ -1805,18 +1839,23 @@ fn normalize_inner_attribute_quotes_preserve_offsets(svg: &str) -> String {
         match b {
             b'"' => {
                 in_double_quote = true;
-                out.push('"');
+                out.push(b'"');
+            }
+            b'\'' => {
+                in_single_quote = true;
+                out.push(b'\'');
             }
             b'>' => {
                 in_tag = false;
-                out.push('>');
+                out.push(b'>');
             }
-            _ => out.push(b as char),
+            _ => out.push(b),
         }
         i += 1;
     }
 
-    out
+    // only ASCII bytes are replaced (with ASCII bytes), so multi-byte UTF-8 sequences are copied intact
+    String::from_utf8(out).expect("quote normalization should keep the SVG valid UTF-8")
 }
 
 fn rewrite_normalized_svg_font_families(
@@ -2251,7 +2290,7 @@ where
         }),
     };
 
-    let usvg_input = normalize_inner_attribute_quotes_preserve_offsets(&stripped_svg);
+    let usvg_input = normalize_quotes_if_unparsable(&stripped_svg);
     let tree = usvg::Tree::from_data(usvg_input.as_bytes(), &options)
         .map_err(|e| format!("failed to parse SVG: {e}"))?;
 
@@ -2624,7 +2663,7 @@ pub fn parse_svg_tree_inline_fonts_only(input_svg: &str) -> Result<usvg::Tree, S
         }),
     };
 
-    let usvg_input = normalize_inner_attribute_quotes_preserve_offsets(&stripped_svg);
+    let usvg_input = normalize_quotes_if_unparsable(&stripped_svg);
     let tree = usvg::Tree::from_data(usvg_input.as_bytes(), &options)
         .map_err(|e| format!("failed to parse SVG: {e}"))?;
 
@@ -2694,6 +2733,34 @@ mod tests {
         let out = remove_inliner_debug_comments(input);
         assert!(out.contains("<!-- keep-me -->"));
         assert!(!out.contains("svg-font-inliner:"));
+    }
+
+    #[test]
+    fn normalize_inner_attribute_quotes_keeps_non_ascii_text() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text font-family=\"é\"x\">A\u{a0}é€</text></svg>";
+        let out = normalize_inner_attribute_quotes_preserve_offsets(input);
+        assert_eq!(
+            out,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><text font-family=\"é'x\">A\u{a0}é€</text></svg>"
+        );
+    }
+
+    #[test]
+    fn normalize_inner_attribute_quotes_keeps_double_quotes_in_single_quoted_value() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text font-family='\"Noto Sans\", sans-serif' x=\"1\">A</text><rect width=\"1\"/></svg>";
+        assert_eq!(
+            normalize_inner_attribute_quotes_preserve_offsets(input),
+            input
+        );
+    }
+
+    #[test]
+    fn normalize_inner_attribute_quotes_keeps_comments_and_cdata() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><!-- a > b < c's --><style><![CDATA[ a > b { font-family: 'x' } ]]></style><text x=\"1\">A</text></svg>";
+        assert_eq!(
+            normalize_inner_attribute_quotes_preserve_offsets(input),
+            input
+        );
     }
 
     #[test]

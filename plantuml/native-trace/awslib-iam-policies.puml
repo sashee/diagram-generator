@@ -1,0 +1,33 @@
+@startuml
+
+!include <awslib14/AWSCommon>
+!include <awslib14/AWSSimplified>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementRole>
+!include <awslib14/SecurityIdentityCompliance/IdentityAccessManagementPermissions>
+!include <awslib14/ApplicationIntegration/SimpleQueueServiceQueue>
+!include <awslib14/General/User>
+!include <awslib14/Storage/SimpleStorageServiceBucket>
+
+caption IAM policy types
+
+frame Account {
+    SimpleStorageServiceBucket(bucket, "Bucket","")
+    User(user, "User","")
+    IdentityAccessManagementRole(role, "Role","")
+    IdentityAccessManagementPermissions(session_policy, "Session Policy","")#d5e8d4
+    IdentityAccessManagementPermissions(permission_boundary, "Permission Boundary","")#dae8fc
+    permission_boundary -up- user
+    user -> session_policy: assume role
+    session_policy --> role: assume role
+    IdentityAccessManagementPermissions(resource_policy, "Resource Policy","")#e1d5e7
+    bucket -- resource_policy
+    IdentityAccessManagementPermissions(identity_policy, "Identity Policy","")#fff2cc
+    role -- identity_policy
+    role -> bucket: read
+
+}
+
+IdentityAccessManagementPermissions(scp, "Service Control Policy","")#ffe6cc
+scp -- Account
+
+@enduml
