@@ -51,7 +51,7 @@ fn rejects_missing_separator() {
 
     assert!(!out.status.success(), "missing '--' should fail");
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("usage: sandbox-run --"),
+        String::from_utf8_lossy(&out.stderr).contains("usage: sandbox-run [--keep-env NAME]... --"),
         "expected usage message, got stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -210,4 +210,155 @@ fn child_gets_private_tmpdir_under_parent_tmpdir() {
     );
 
     assert_temp_base_is_empty(tmp_base.path());
+}
+
+#[test]
+fn does_not_pass_the_callers_environment() {
+    let out = Command::new(sandbox_run_bin())
+        .env("SANDBOX_RUN_TEST_SECRET", "secret-value")
+        .args([
+            "--",
+            "sh",
+            "-c",
+            "echo \"${SANDBOX_RUN_TEST_SECRET-unset}\"",
+        ])
+        .output()
+        .expect("sandbox-run should execute");
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "unset");
+}
+
+#[test]
+fn passes_kept_variables_path_and_private_tmpdir() {
+    let tmp_base = tempfile::tempdir().expect("should create test temp base");
+
+    let out = Command::new(sandbox_run_bin())
+        .env("TMPDIR", tmp_base.path())
+        .env("SANDBOX_RUN_TEST_KEPT", "kept-value")
+        .env("SANDBOX_RUN_TEST_SECRET", "secret-value")
+        .args([
+            "--keep-env",
+            "SANDBOX_RUN_TEST_KEPT",
+            "--",
+            "sh",
+            "-c",
+            "echo \"$SANDBOX_RUN_TEST_KEPT ${SANDBOX_RUN_TEST_SECRET-unset} ${PATH:+path-set} $TMPDIR\"",
+        ])
+        .output()
+        .expect("sandbox-run should execute");
+
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let fields = stdout.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(fields[..3], ["kept-value", "unset", "path-set"]);
+    assert!(
+        std::path::Path::new(fields[3]).starts_with(tmp_base.path()),
+        "TMPDIR should be the private temp directory, got {}",
+        fields[3]
+    );
+}
+
+fn arrived<T>(result: std::io::Result<T>) -> bool {
+    match result {
+        Ok(_) => true,
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(err) => panic!("listener failed: {err}"),
+    }
+}
+
+fn run_bash(sandboxed: bool, script: &str) -> std::process::Output {
+    let mut command = if sandboxed {
+        let mut command = Command::new(sandbox_run_bin());
+        command.arg("--");
+        command
+    } else {
+        Command::new("env")
+    };
+    command
+        .args(["bash", "-c", script])
+        .output()
+        .expect("command should execute")
+}
+
+// bash names the redirection target when it is denied, so a bash that could not even start (e.g. one outside the
+// Nix store, which Landlock doesn't allow to execute) fails the check. seccomp denies with EPERM, Landlock with EACCES
+fn assert_denied_by_sandbox(out: &std::process::Output, target: &str) {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.lines().any(|line| line.contains(target)
+            && (line.contains("Operation not permitted") || line.contains("Permission denied"))),
+        "expected the sandbox to deny bash access to {target}, got stderr: {stderr}"
+    );
+}
+
+#[test]
+fn blocks_tcp_connections() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("should bind TCP listener");
+    listener
+        .set_nonblocking(true)
+        .expect("should make listener nonblocking");
+    let port = listener
+        .local_addr()
+        .expect("should get listener address")
+        .port();
+    let target = format!("/dev/tcp/127.0.0.1/{port}");
+    let script = format!("echo leak > {target}");
+
+    let control = run_bash(false, &script);
+    assert!(
+        control.status.success(),
+        "control should connect outside the sandbox"
+    );
+    assert!(
+        arrived(listener.accept()),
+        "control connection should arrive"
+    );
+
+    let out = run_bash(true, &script);
+    assert_denied_by_sandbox(&out, &target);
+    assert!(
+        !arrived(listener.accept()),
+        "TCP connection from the sandbox reached the listener"
+    );
+}
+
+#[test]
+fn blocks_udp_datagrams() {
+    let receiver = std::net::UdpSocket::bind("127.0.0.1:0").expect("should bind UDP receiver");
+    receiver
+        .set_nonblocking(true)
+        .expect("should make receiver nonblocking");
+    let port = receiver
+        .local_addr()
+        .expect("should get receiver address")
+        .port();
+    let target = format!("/dev/udp/127.0.0.1/{port}");
+    let script = format!("echo leak > {target}");
+    let mut buf = [0u8; 16];
+
+    let control = run_bash(false, &script);
+    assert!(
+        control.status.success(),
+        "control should send outside the sandbox"
+    );
+    assert!(
+        arrived(receiver.recv_from(&mut buf)),
+        "control datagram should arrive"
+    );
+
+    let out = run_bash(true, &script);
+    assert_denied_by_sandbox(&out, &target);
+    assert!(
+        !arrived(receiver.recv_from(&mut buf)),
+        "UDP datagram from the sandbox reached the receiver"
+    );
 }

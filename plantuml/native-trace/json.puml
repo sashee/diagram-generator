@@ -1,0 +1,3 @@
+@startjson
+{"name": "diagram", "tags": ["a", "b"], "nested": {"ok": true}}
+@endjson

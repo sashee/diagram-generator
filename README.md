@@ -13,8 +13,8 @@ The shell provides:
 - `rustc`
 - `cargo`
 - `fontconfig`
-- `pyftsubset` (via `fonttools`)
-- `PYFTSUBSET_BIN` and `NIX_STORE_DIR` environment variables
+- `hb-subset` (via `harfbuzz`)
+- `HB_SUBSET_BIN` and `NIX_STORE_DIR` environment variables
 
 ## Run Tests Per Rust Project
 

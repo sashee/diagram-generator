@@ -49,8 +49,8 @@ EOF
 )
 export FONTCONFIG_FILE=${fontconfig}
 export SVG_FONT_EMBED_DEBUG=${if debug then "1" else "0"}
-export PYFTSUBSET_BIN=${pkgs.python3Packages.fonttools}/bin/pyftsubset
-export PATH=${pkgs.lib.makeBinPath [pkgs.fontconfig pkgs.python3Packages.fonttools]}:$PATH
+export HB_SUBSET_BIN=${pkgs.harfbuzz.dev}/bin/hb-subset
+export PATH=${pkgs.lib.makeBinPath [pkgs.fontconfig]}:$PATH
 
 case $1 in
     --list-available-renderers)
@@ -76,7 +76,12 @@ EOF
 ;;
     *)
 
-${sandbox_run}/bin/sandbox-run -- ${diagram_generator_rs}/bin/diagram-generator-rs "$@"
+${sandbox_run}/bin/sandbox-run \
+	--keep-env AVAILABLE_RENDERERS \
+	--keep-env FONTCONFIG_FILE \
+	--keep-env SVG_FONT_EMBED_DEBUG \
+	--keep-env HB_SUBSET_BIN \
+	-- ${diagram_generator_rs}/bin/diagram-generator-rs "$@"
 
 ;;
 esac

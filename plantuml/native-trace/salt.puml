@@ -1,0 +1,7 @@
+@startsalt
+{
+  Login | "user"
+  Password | "****"
+  [Cancel] | [OK]
+}
+@endsalt

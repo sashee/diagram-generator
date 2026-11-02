@@ -30,6 +30,8 @@ struct EmbeddedFont {
     mime: &'static str,
     format_hint: &'static str,
     base64_data: String,
+    // the range of a variable font's wght axis: it is embedded once for all the weights it is used with
+    weight_range: Option<(u16, u16)>,
 }
 
 #[derive(Clone, Debug)]
@@ -178,12 +180,12 @@ fn find_tag_end_outside_quotes(fragment: &str) -> Option<usize> {
     None
 }
 
-fn is_svg_local_name(name: &[u8]) -> bool {
-    let local = match name.rsplit(|b| *b == b':').next() {
+fn is_svg_local_name(name: &str) -> bool {
+    let local = match name.rsplit(':').next() {
         Some(value) => value,
         None => name,
     };
-    local.eq_ignore_ascii_case(b"svg")
+    local.eq_ignore_ascii_case("svg")
 }
 
 fn find_doctype_range_before_root_svg(svg: &str) -> Result<Option<(usize, usize)>, String> {
@@ -1038,23 +1040,26 @@ fn normalize_unicode_range_spec(spec: &str) -> String {
     spec.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+fn hb_subset_bin() -> String {
+    std::env::var("HB_SUBSET_BIN").unwrap_or_else(|_| "hb-subset".to_string())
+}
+
 fn subset_font_to_unicode_range(
     input_path: &Path,
     output_path: &Path,
     unicode_range: &str,
 ) -> Result<(), String> {
-    let pyftsubset_bin =
-        std::env::var("PYFTSUBSET_BIN").unwrap_or_else(|_| "pyftsubset".to_string());
+    let hb_subset_bin = hb_subset_bin();
     let unicode_spec = normalize_unicode_range_spec(unicode_range);
     let output_arg = format!("--output-file={}", output_path.display());
     let unicodes_arg = format!("--unicodes={unicode_spec}");
 
-    let output = Command::new(&pyftsubset_bin)
+    let output = Command::new(&hb_subset_bin)
         .arg(input_path)
         .arg(output_arg)
         .arg(unicodes_arg)
         .output()
-        .map_err(|e| format!("failed to execute '{}': {e}", pyftsubset_bin))?;
+        .map_err(|e| format!("failed to execute '{}': {e}", hb_subset_bin))?;
 
     if output.status.success() {
         Ok(())
@@ -1062,13 +1067,13 @@ fn subset_font_to_unicode_range(
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
             Err(format!(
-                "pyftsubset failed for '{}' with status {}",
+                "hb-subset failed for '{}' with status {}",
                 input_path.display(),
                 output.status
             ))
         } else {
             Err(format!(
-                "pyftsubset failed for '{}': {}",
+                "hb-subset failed for '{}': {}",
                 input_path.display(),
                 stderr
             ))
@@ -1168,8 +1173,37 @@ fn font_spec_to_query(font: &usvg::Font, missing_char: Option<char>) -> FontQuer
     }
 }
 
+// fontconfig has its own weight scale (regular = 80, bold = 200): convert the CSS weight with the table of
+// fontconfig's FcWeightFromOpenType, interpolating between its entries
+fn css_weight_to_fontconfig(weight: u16) -> u16 {
+    const MAP: [(f64, f64); 13] = [
+        (0.0, 0.0),
+        (100.0, 0.0),
+        (200.0, 40.0),
+        (300.0, 50.0),
+        (350.0, 55.0),
+        (380.0, 75.0),
+        (400.0, 80.0),
+        (500.0, 100.0),
+        (600.0, 180.0),
+        (700.0, 200.0),
+        (800.0, 205.0),
+        (900.0, 210.0),
+        (1000.0, 215.0),
+    ];
+    let css = f64::from(weight.min(1000));
+    let fc = MAP
+        .windows(2)
+        .find(|pair| css <= pair[1].0)
+        .map_or(215.0, |pair| {
+            let ((css0, fc0), (css1, fc1)) = (pair[0], pair[1]);
+            fc0 + (css - css0) * (fc1 - fc0) / (css1 - css0)
+        });
+    fc.round() as u16
+}
+
 fn build_fc_match_pattern(query: &FontQuery, family: &str) -> String {
-    let mut pattern = format!("{family}:weight={}", query.weight);
+    let mut pattern = format!("{family}:weight={}", css_weight_to_fontconfig(query.weight));
     match query.style.as_str() {
         "Italic" => pattern.push_str(":slant=italic"),
         "Oblique" => pattern.push_str(":slant=oblique"),
@@ -1531,9 +1565,43 @@ fn synthetic_family_name(request: &FontQuery, font: &EmbeddedFont) -> String {
     bytes.extend_from_slice(font.base64_data.as_bytes());
     bytes.extend_from_slice(request.style.as_bytes());
     bytes.extend_from_slice(request.stretch.as_bytes());
-    bytes.extend_from_slice(request.weight.to_string().as_bytes());
+    bytes.extend_from_slice(css_weight(request, font).as_bytes());
     let hash = fnv1a64(&bytes);
     format!("svg-font-{hash:016x}")
+}
+
+// Characters that are never drawn (controls, and Unicode's Default_Ignorable_Code_Point: joiners, variation
+// selectors, ...), so it doesn't matter that no font covers them
+fn is_ignorable_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c as u32,
+            0x00AD
+                | 0x034F
+                | 0x061C
+                | 0x115F..=0x1160
+                | 0x17B4..=0x17B5
+                | 0x180B..=0x180F
+                | 0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x206F
+                | 0x3164
+                | 0xFE00..=0xFE0F
+                | 0xFEFF
+                | 0xFFA0
+                | 0xFFF0..=0xFFF8
+                | 0x1BCA0..=0x1BCA3
+                | 0x1D173..=0x1D17A
+                | 0xE0000..=0xE0FFF
+        )
+}
+
+fn missing_glyph_error(c: char, families: &[String]) -> String {
+    format!(
+        "no font provides U+{:04X} '{c}' (requested families: {})",
+        c as u32,
+        families.join(", ")
+    )
 }
 
 fn path_supports_char(
@@ -1638,20 +1706,35 @@ fn collect_span_alias_lists(
                                         )
                                     },
                                 )?;
-                                if already_supported {
+                                if already_supported || is_ignorable_char(c) {
                                     continue;
                                 }
 
+                                // without a font for the character, it would be drawn as a missing-glyph box: the
+                                // embedded fonts get synthetic names, so the browser can't fall back to system fonts
                                 let mut fallback_query = primary_query.clone();
                                 fallback_query.missing_char = Some(c);
-                                let fallback_runtime = resolved_paths.get(&fallback_query).ok_or_else(|| {
-                                    format!(
-                                        "failed to map normalized span fallback request: {fallback_query:?}"
-                                    )
-                                })?;
-                                if used_runtime_paths.contains(fallback_runtime) {
-                                    continue;
-                                }
+                                let fallback_runtime = match resolved_paths
+                                    .get(&fallback_query)
+                                    .filter(|path| !used_runtime_paths.contains(*path))
+                                {
+                                    Some(path)
+                                        if path_supports_char(
+                                            db,
+                                            loaded_paths,
+                                            support_cache,
+                                            path,
+                                            c,
+                                        )? =>
+                                    {
+                                        path
+                                    }
+                                    // whitespace has no ink, it doesn't need a covering font
+                                    _ if c.is_whitespace() => continue,
+                                    _ => {
+                                        return Err(missing_glyph_error(c, &primary_query.families))
+                                    }
+                                };
 
                                 used_runtime_paths.push(fallback_runtime.clone());
                                 let fallback_emit = runtime_to_emit
@@ -1753,51 +1836,158 @@ fn escape_inner_quotes_in_font_family_attrs(svg: &str) -> String {
     out
 }
 
+// Comments, CDATA sections, processing instructions and declarations are copied unchanged up to their own
+// terminator: their content is not markup, so quotes or angle brackets in it must not change the parsing state
+fn markup_declaration_len(rest: &[u8]) -> Option<usize> {
+    let (opener, terminator): (&[u8], &[u8]) = if rest.starts_with(b"<!--") {
+        (b"<!--", b"-->")
+    } else if rest.starts_with(b"<![CDATA[") {
+        (b"<![CDATA[", b"]]>")
+    } else if rest.starts_with(b"<?") {
+        (b"<?", b"?>")
+    } else if rest.starts_with(b"<!") {
+        (b"<!", b">")
+    } else {
+        return None;
+    };
+    let body = &rest[opener.len()..];
+    let body_len = body
+        .windows(terminator.len())
+        .position(|window| window == terminator)
+        .map_or(body.len(), |pos| pos + terminator.len());
+    Some(opener.len() + body_len)
+}
+
+// Root attributes of the source that still apply to the output: usvg writes the root with only the size. The
+// background is CSS, which usvg doesn't render, so it is kept, without other declarations (e.g. fonts)
+fn source_root_attributes(svg: &str) -> Result<Vec<(String, String)>, String> {
+    let without_doctype = normalize_svg_for_strict_parse(svg)?;
+    let parseable = normalize_quotes_if_unparsable(&without_doctype);
+    let Ok(doc) = roxmltree::Document::parse(&parseable) else {
+        return Ok(Vec::new());
+    };
+    let attributes = doc
+        .root_element()
+        .attributes()
+        .filter(|attr| attr.namespace().is_none())
+        .filter_map(|attr| match attr.name() {
+            "class" | "preserveAspectRatio" => {
+                Some((attr.name().to_string(), attr.value().to_string()))
+            }
+            name if name.starts_with("data-") => Some((name.to_string(), attr.value().to_string())),
+            "style" => {
+                let background = attr
+                    .value()
+                    .split(';')
+                    .filter(|declaration| {
+                        declaration.split_once(':').is_some_and(|(property, _)| {
+                            matches!(
+                                property.trim().to_ascii_lowercase().as_str(),
+                                "background" | "background-color"
+                            )
+                        })
+                    })
+                    .map(str::trim)
+                    .collect::<Vec<_>>()
+                    .join(";");
+                (!background.is_empty()).then(|| ("style".to_string(), background))
+            }
+            _ => None,
+        })
+        .collect();
+    Ok(attributes)
+}
+
+// Adds a viewBox for the written size, so the SVG scales instead of being clipped when displayed at another size,
+// and the kept source attributes to the root element
+fn add_root_attributes(
+    svg: &str,
+    source_attributes: &[(String, String)],
+) -> Result<String, String> {
+    let open_end = find_root_svg_open_tag_end(svg)
+        .ok_or_else(|| "failed to find root <svg> opening tag in normalized SVG".to_string())?;
+    let insert_at = if svg[..open_end].ends_with("/>") {
+        open_end - 2
+    } else {
+        open_end - 1
+    };
+    let doc = roxmltree::Document::parse(svg)
+        .map_err(|e| format!("failed to parse normalized SVG: {e}"))?;
+    let root = doc.root_element();
+    let view_box = root
+        .attribute("width")
+        .zip(root.attribute("height"))
+        .map(|(width, height)| ("viewBox".to_string(), format!("0 0 {width} {height}")));
+    let rendered = view_box
+        .into_iter()
+        .chain(source_attributes.iter().cloned())
+        .filter(|(name, _)| root.attribute(name.as_str()).is_none())
+        .map(|(name, value)| format!(" {name}=\"{}\"", xml_escape_attr(&value)))
+        .collect::<String>();
+    Ok(format!(
+        "{}{rendered}{}",
+        &svg[..insert_at],
+        &svg[insert_at..]
+    ))
+}
+
+// The quote fix-up is only for SVGs with malformed attribute quoting, valid documents are passed through unchanged
+fn normalize_quotes_if_unparsable(svg: &str) -> Cow<'_, str> {
+    match roxmltree::Document::parse(svg) {
+        Ok(_) => Cow::Borrowed(svg),
+        Err(_) => Cow::Owned(normalize_inner_attribute_quotes_preserve_offsets(svg)),
+    }
+}
+
 fn normalize_inner_attribute_quotes_preserve_offsets(svg: &str) -> String {
     let bytes = svg.as_bytes();
-    let mut out = String::with_capacity(svg.len());
+    let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0usize;
     let mut in_tag = false;
     let mut in_double_quote = false;
-    let mut in_special = false;
+    let mut in_single_quote = false;
 
     while i < bytes.len() {
         if !in_tag {
+            if let Some(len) = markup_declaration_len(&bytes[i..]) {
+                out.extend_from_slice(&bytes[i..i + len]);
+                i += len;
+                continue;
+            }
             if bytes[i] == b'<' {
                 in_tag = true;
-                in_special = bytes.get(i + 1).copied() == Some(b'!')
-                    || bytes.get(i + 1).copied() == Some(b'?');
             }
-            out.push(bytes[i] as char);
+            out.push(bytes[i]);
             i += 1;
             continue;
         }
 
         let b = bytes[i];
-        if in_special {
-            out.push(b as char);
-            if b == b'>' {
-                in_tag = false;
-                in_special = false;
-            }
-            i += 1;
-            continue;
-        }
 
         if in_double_quote {
             if b == b'"' {
                 let next = bytes.get(i + 1).copied();
                 let is_closing = next.is_none()
                     || next.is_some_and(|n| n.is_ascii_whitespace() || n == b'/' || n == b'>');
-                out.push(if is_closing { '"' } else { '\'' });
+                out.push(if is_closing { b'"' } else { b'\'' });
                 if is_closing {
                     in_double_quote = false;
                 }
             } else if b == b'<' {
-                out.push('.');
+                out.push(b'.');
             } else {
-                out.push(b as char);
+                out.push(b);
             }
+            i += 1;
+            continue;
+        }
+
+        // a single-quoted value can contain double quotes, and only its closing quote can be a single quote
+        if in_single_quote {
+            if b == b'\'' {
+                in_single_quote = false;
+            }
+            out.push(if b == b'<' { b'.' } else { b });
             i += 1;
             continue;
         }
@@ -1805,18 +1995,23 @@ fn normalize_inner_attribute_quotes_preserve_offsets(svg: &str) -> String {
         match b {
             b'"' => {
                 in_double_quote = true;
-                out.push('"');
+                out.push(b'"');
+            }
+            b'\'' => {
+                in_single_quote = true;
+                out.push(b'\'');
             }
             b'>' => {
                 in_tag = false;
-                out.push('>');
+                out.push(b'>');
             }
-            _ => out.push(b as char),
+            _ => out.push(b),
         }
         i += 1;
     }
 
-    out
+    // only ASCII bytes are replaced (with ASCII bytes), so multi-byte UTF-8 sequences are copied intact
+    String::from_utf8(out).expect("quote normalization should keep the SVG valid UTF-8")
 }
 
 fn rewrite_normalized_svg_font_families(
@@ -1897,6 +2092,122 @@ fn detect_font_type(path: &Path) -> (&'static str, &'static str) {
     }
 }
 
+// The characters of the text in the tree: the embedded fonts only need their glyphs
+fn text_chars(group: &usvg::Group) -> BTreeSet<char> {
+    group
+        .children()
+        .iter()
+        .flat_map(|node| match node {
+            usvg::Node::Group(child) => text_chars(child),
+            usvg::Node::Text(text) => text.chunks().iter().flat_map(chunk_chars).collect(),
+            _ => BTreeSet::new(),
+        })
+        .collect()
+}
+
+// Without a small caps feature in the font, browsers draw small caps as scaled capitals
+fn chunk_chars(chunk: &usvg::TextChunk) -> BTreeSet<char> {
+    let small_caps = chunk
+        .spans()
+        .iter()
+        .filter(|span| span.small_caps())
+        .filter_map(|span| chunk.text().get(span.start()..span.end()))
+        .flat_map(|text| text.chars().flat_map(char::to_uppercase));
+    chunk.text().chars().chain(small_caps).collect()
+}
+
+// Tables browsers draw or shape with, which hb-subset can only drop: SVG glyphs, legacy kerning (used without GPOS),
+// AAT shaping and embedded bitmaps
+fn relies_on_unsubsettable_tables(bytes: &[u8]) -> bool {
+    let Ok(face) = ttf_parser::RawFace::parse(bytes, 0) else {
+        return false;
+    };
+    let has = |tag: &[u8; 4]| face.table(ttf_parser::Tag::from_bytes(tag)).is_some();
+    [b"SVG ", b"morx", b"mort", b"kerx", b"EBDT"]
+        .into_iter()
+        .any(has)
+        || (has(b"kern") && !has(b"GPOS"))
+}
+
+// Keeps only the glyphs of the given characters, and what shaping them needs (e.g. ligatures, mirrored brackets).
+// Variations are kept. Embedded whole are: collections, as hb-subset would need to know which of their fonts is used,
+// fonts relying on tables hb-subset can't subset, and fonts it fails on.
+fn subset_font_bytes(
+    path: &Path,
+    chars: &BTreeSet<char>,
+    work_dir: &Path,
+) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| format!("failed to read font file '{}': {e}", path.display()))?;
+    if bytes.starts_with(b"ttcf") || relies_on_unsubsettable_tables(&bytes) {
+        return Ok(bytes);
+    }
+
+    std::fs::create_dir_all(work_dir)
+        .map_err(|e| format!("failed to create font subset directory: {e}"))?;
+    let unicodes_path = work_dir.join("unicodes.txt");
+    let unicodes = chars
+        .iter()
+        .map(|c| format!("U+{:04X}\n", *c as u32))
+        .collect::<String>();
+    std::fs::write(&unicodes_path, unicodes)
+        .map_err(|e| format!("failed to write font subset code points: {e}"))?;
+    let output_path = work_dir.join("subset");
+
+    let hb_subset_bin = hb_subset_bin();
+    let output = Command::new(&hb_subset_bin)
+        .arg(path)
+        .arg(format!("--unicodes-file={}", unicodes_path.display()))
+        .arg("--layout-features=*")
+        // keeps the copyright and license records, which the subset fonts are published with
+        .arg("--name-IDs=*")
+        .arg(format!("--output-file={}", output_path.display()))
+        .output()
+        .map_err(|e| format!("failed to execute '{hb_subset_bin}': {e}"))?;
+    if !output.status.success() {
+        return Ok(bytes);
+    }
+
+    std::fs::read(&output_path).map_err(|e| format!("failed to read font subset: {e}"))
+}
+
+// Subsets are plain TrueType/OpenType, whatever the extension of the font file
+fn detect_font_type_from_bytes(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    match bytes.get(..4)? {
+        [0, 1, 0, 0] | b"true" => Some(("font/ttf", "truetype")),
+        b"OTTO" => Some(("font/otf", "opentype")),
+        b"wOFF" => Some(("font/woff", "woff")),
+        b"wOF2" => Some(("font/woff2", "woff2")),
+        _ => None,
+    }
+}
+
+fn variable_weight_range(bytes: &[u8]) -> Option<(u16, u16)> {
+    let face = ttf_parser::Face::parse(bytes, 0).ok()?;
+    let wght = ttf_parser::Tag::from_bytes(b"wght");
+    face.variation_axes()
+        .into_iter()
+        .find(|axis| axis.tag == wght)
+        .map(|axis| {
+            (
+                css_weight_from_axis(axis.min_value),
+                css_weight_from_axis(axis.max_value),
+            )
+        })
+}
+
+// CSS weights are 1-1000
+fn css_weight_from_axis(value: f32) -> u16 {
+    value.round().clamp(1.0, 1000.0) as u16
+}
+
+fn css_weight(request: &FontQuery, font: &EmbeddedFont) -> String {
+    match font.weight_range {
+        Some((min, max)) => format!("{min} {max}"),
+        None => request.weight.to_string(),
+    }
+}
+
 fn build_css(
     emitted_faces: &[(String, FontQuery, PathBuf)],
     preserved_css: &str,
@@ -1907,7 +2218,12 @@ fn build_css(
         css.push_str(preserved_css.trim());
         css.push('\n');
     }
+    // the weights of a variable font share one face
+    let mut emitted_families = BTreeSet::new();
     for (family, request, path) in emitted_faces {
+        if !emitted_families.insert(family) {
+            continue;
+        }
         let font = match embedded.get(path) {
             Some(v) => v,
             None => continue,
@@ -1919,7 +2235,7 @@ fn build_css(
             "  font-style: {};\n",
             style_to_css(&request.style)
         ));
-        css.push_str(&format!("  font-weight: {};\n", request.weight));
+        css.push_str(&format!("  font-weight: {};\n", css_weight(request, font)));
         css.push_str(&format!(
             "  font-stretch: {};\n",
             stretch_to_css(&request.stretch)
@@ -2149,6 +2465,9 @@ where
             None
         }),
         select_fallback: Box::new(move |missing_char, used_fonts, db| {
+            if is_ignorable_char(missing_char) {
+                return None;
+            }
             let query = match face_query_context_for_select_fallback
                 .lock()
                 .ok()
@@ -2221,7 +2540,21 @@ where
 
                     match ensure_font_loaded(db, &loaded_paths_for_select_fallback, &path) {
                         Ok(id) => {
-                            if used_fonts.contains(&id) {
+                            // without a covering font, usvg would draw a missing-glyph box or drop the text.
+                            // A covering font that is already used means a cluster (e.g. with a combining mark)
+                            // couldn't be shaped: the per-character check reports the actual character
+                            let covers = db_face_supports_char(db, id, missing_char);
+                            if !covers && !missing_char.is_whitespace() {
+                                if let Ok(mut slot) = resolver_error_for_select_fallback.lock() {
+                                    if slot.is_none() {
+                                        *slot = Some(missing_glyph_error(
+                                            missing_char,
+                                            &query.families,
+                                        ));
+                                    }
+                                }
+                            }
+                            if !covers || used_fonts.contains(&id) {
                                 return None;
                             }
                             if let Ok(mut map) = face_query_context_for_select_fallback.lock() {
@@ -2251,7 +2584,7 @@ where
         }),
     };
 
-    let usvg_input = normalize_inner_attribute_quotes_preserve_offsets(&stripped_svg);
+    let usvg_input = normalize_quotes_if_unparsable(&stripped_svg);
     let tree = usvg::Tree::from_data(usvg_input.as_bytes(), &options)
         .map_err(|e| format!("failed to parse SVG: {e}"))?;
 
@@ -2348,21 +2681,25 @@ where
         })
         .collect::<Vec<_>>();
 
-    let mut embedded = BTreeMap::<PathBuf, EmbeddedFont>::new();
-    for path in needed_paths {
-        let bytes = std::fs::read(&path)
-            .map_err(|e| format!("failed to read font file '{}': {e}", path.display()))?;
-        let (mime, format_hint) = detect_font_type(&path);
-        let base64_data = base64::engine::general_purpose::STANDARD.encode(bytes);
-        embedded.insert(
-            path.clone(),
-            EmbeddedFont {
+    let used_chars = text_chars(tree.root());
+    let subset_temp = TempDir::new().map_err(|e| format!("failed to create temp dir: {e}"))?;
+    let embedded = needed_paths
+        .iter()
+        .enumerate()
+        .map(|(idx, path)| {
+            let bytes =
+                subset_font_bytes(path, &used_chars, &subset_temp.path().join(idx.to_string()))?;
+            let (mime, format_hint) =
+                detect_font_type_from_bytes(&bytes).unwrap_or_else(|| detect_font_type(path));
+            let font = EmbeddedFont {
                 mime,
                 format_hint,
-                base64_data,
-            },
-        );
-    }
+                weight_range: variable_weight_range(&bytes),
+                base64_data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            };
+            Ok((path.clone(), font))
+        })
+        .collect::<Result<BTreeMap<_, _>, String>>()?;
 
     let preserved_css = collect_preserved_style_css(&stripped_svg)?;
     let emitted_faces = merged_request_to_font
@@ -2419,7 +2756,10 @@ where
         &alias_by_key,
         &alias_by_descriptor,
     )?;
-    let rewritten_svg = rewrite_normalized_svg_font_families(&normalized_svg, &span_alias_lists)?;
+    let rewritten_svg = add_root_attributes(
+        &rewrite_normalized_svg_font_families(&normalized_svg, &span_alias_lists)?,
+        &source_root_attributes(&stripped_svg)?,
+    )?;
     let preserved_defs_content = collect_preserved_defs_content(&stripped_svg, &rewritten_svg)?;
     let rewritten_svg = if preserved_defs_content.is_empty() {
         rewritten_svg
@@ -2455,9 +2795,19 @@ where
     Ok(output_svg)
 }
 
+fn missing_inlined_glyph_error(c: char) -> String {
+    format!(
+        "no font inlined in the SVG provides U+{:04X} '{c}'",
+        c as u32
+    )
+}
+
 pub fn ensure_text_fonts_inline(input_svg: &str) -> Result<(), String> {
-    embed_svg_fonts(input_svg, |_query| {
-        Err("font is not inlined in SVG @font-face data source".to_string())
+    embed_svg_fonts(input_svg, |query| {
+        Err(match query.missing_char {
+            Some(c) => missing_inlined_glyph_error(c),
+            None => "font is not inlined in SVG @font-face data source".to_string(),
+        })
     })
     .map(|_| ())
 }
@@ -2562,6 +2912,9 @@ pub fn parse_svg_tree_inline_fonts_only(input_svg: &str) -> Result<usvg::Tree, S
             }
         }),
         select_fallback: Box::new(move |missing_char, used_fonts, db| {
+            if is_ignorable_char(missing_char) {
+                return None;
+            }
             let query = match face_query_context_for_select_fallback
                 .lock()
                 .ok()
@@ -2617,14 +2970,14 @@ pub fn parse_svg_tree_inline_fonts_only(input_svg: &str) -> Result<usvg::Tree, S
 
             if let Ok(mut slot) = resolver_error_for_select_fallback.lock() {
                 if slot.is_none() {
-                    *slot = Some("font is not inlined in SVG @font-face data source".to_string());
+                    *slot = Some(missing_inlined_glyph_error(missing_char));
                 }
             }
             None
         }),
     };
 
-    let usvg_input = normalize_inner_attribute_quotes_preserve_offsets(&stripped_svg);
+    let usvg_input = normalize_quotes_if_unparsable(&stripped_svg);
     let tree = usvg::Tree::from_data(usvg_input.as_bytes(), &options)
         .map_err(|e| format!("failed to parse SVG: {e}"))?;
 
@@ -2694,6 +3047,101 @@ mod tests {
         let out = remove_inliner_debug_comments(input);
         assert!(out.contains("<!-- keep-me -->"));
         assert!(!out.contains("svg-font-inliner:"));
+    }
+
+    #[test]
+    fn normalize_inner_attribute_quotes_keeps_non_ascii_text() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text font-family=\"é\"x\">A\u{a0}é€</text></svg>";
+        let out = normalize_inner_attribute_quotes_preserve_offsets(input);
+        assert_eq!(
+            out,
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"><text font-family=\"é'x\">A\u{a0}é€</text></svg>"
+        );
+    }
+
+    #[test]
+    fn normalize_inner_attribute_quotes_keeps_double_quotes_in_single_quoted_value() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><text font-family='\"Noto Sans\", sans-serif' x=\"1\">A</text><rect width=\"1\"/></svg>";
+        assert_eq!(
+            normalize_inner_attribute_quotes_preserve_offsets(input),
+            input
+        );
+    }
+
+    #[test]
+    fn normalize_inner_attribute_quotes_keeps_comments_and_cdata() {
+        let input = "<svg xmlns=\"http://www.w3.org/2000/svg\"><!-- a > b < c's --><style><![CDATA[ a > b { font-family: 'x' } ]]></style><text x=\"1\">A</text></svg>";
+        assert_eq!(
+            normalize_inner_attribute_quotes_preserve_offsets(input),
+            input
+        );
+    }
+
+    #[test]
+    fn css_weight_to_fontconfig_follows_fontconfig_scale() {
+        let converted = [
+            0, 100, 200, 300, 350, 380, 400, 450, 500, 600, 700, 800, 900, 1000,
+        ]
+        .map(css_weight_to_fontconfig);
+        assert_eq!(
+            converted,
+            [0, 0, 40, 50, 55, 75, 80, 90, 100, 180, 200, 205, 210, 215]
+        );
+    }
+
+    #[test]
+    fn css_weight_from_axis_stays_in_the_css_range() {
+        assert_eq!(
+            [0.0, 449.6, 1200.0].map(css_weight_from_axis),
+            [1, 450, 1000]
+        );
+    }
+
+    // An sfnt with empty tables: enough for looking at which tables a font has
+    fn sfnt_with_tables(tags: &[&[u8; 4]]) -> Vec<u8> {
+        let sorted_tags = tags.iter().copied().collect::<BTreeSet<_>>();
+        let header = [0, 1, 0, 0]
+            .into_iter()
+            .chain((sorted_tags.len() as u16).to_be_bytes())
+            .chain([0; 6]);
+        let records = sorted_tags
+            .into_iter()
+            .flat_map(|tag| tag.iter().copied().chain([0; 12]));
+        header.chain(records).collect()
+    }
+
+    #[test]
+    fn fonts_relying_on_tables_hb_subset_cannot_subset_are_detected() {
+        let relies = |tags: &[&[u8; 4]]| relies_on_unsubsettable_tables(&sfnt_with_tables(tags));
+        assert!(!relies(&[b"glyf", b"GPOS"]));
+        assert!(!relies(&[b"glyf", b"GPOS", b"kern"]));
+        assert!(relies(&[b"glyf", b"kern"]));
+        assert!(relies(&[b"glyf", b"GPOS", b"SVG "]));
+        assert!(relies(&[b"glyf", b"morx"]));
+        assert!(relies(&[b"glyf", b"EBDT"]));
+    }
+
+    #[test]
+    fn source_root_attributes_keep_presentation_attributes_and_background() {
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" contentStyleType="text/css" data-diagram-type="SEQUENCE" height="111px" preserveAspectRatio="none" style="width:65px;height:111px;background:#FFFFFF;" version="1.1" viewBox="0 0 65 111" width="65px" zoomAndPan="magnify"/>"#;
+        let expected = [
+            ("data-diagram-type", "SEQUENCE"),
+            ("preserveAspectRatio", "none"),
+            ("style", "background:#FFFFFF"),
+        ]
+        .map(|(name, value)| (name.to_string(), value.to_string()));
+        assert_eq!(source_root_attributes(svg), Ok(expected.to_vec()));
+    }
+
+    #[test]
+    fn add_root_attributes_adds_view_box_for_the_written_size() {
+        let written =
+            r#"<svg width="65" height="111" xmlns="http://www.w3.org/2000/svg"><g/></svg>"#;
+        let kept = [("data-diagram-type".to_string(), "A&B".to_string())];
+        assert_eq!(
+            add_root_attributes(written, &kept),
+            Ok(r#"<svg width="65" height="111" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 65 111" data-diagram-type="A&amp;B"><g/></svg>"#.to_string())
+        );
     }
 
     #[test]

@@ -1,0 +1,4 @@
+@startuml
+!theme materia
+Alice -> Bob : hello
+@enduml

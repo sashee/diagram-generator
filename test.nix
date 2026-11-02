@@ -52,7 +52,7 @@ let
       testsDir = ./tests;
     in
     pkgs.runCommand "diagram-generator-test-${testName}" {
-      nativeBuildInputs = [ pkgs.nodejs_latest pkgs.python3Packages.fonttools pkgs.fontconfig ];
+      nativeBuildInputs = [ pkgs.nodejs_latest pkgs.fontconfig ];
     } ''
       set -euo pipefail
       mkdir -p "$out"
@@ -100,7 +100,6 @@ let
       pkgs.nodejs_latest
       pkgs.rustc
       pkgs.cargo
-      pkgs.python3Packages.fonttools
       pkgs.fontconfig
     ];
     shellHook = ''
@@ -112,7 +111,7 @@ let
       export SVG_FONT_INLINER_BIN_A="${svgFontInlinerA}/bin/svg-font-inliner"
       export SVG_FONT_INLINER_BIN_B="${svgFontInlinerB}/bin/svg-font-inliner"
       export SUPPORTED_VERSIONS_JSON="${supportedVersionsJson}"
-      export PYFTSUBSET_BIN="${pkgs.python3Packages.fonttools}/bin/pyftsubset"
+      export HB_SUBSET_BIN="${pkgs.harfbuzz.dev}/bin/hb-subset"
       export DG_TEST_TMP="$(mktemp -d "''${TMPDIR:-/tmp}/diagram-generator-tests.XXXXXX")"
 
       run-test() {
@@ -152,7 +151,7 @@ let
       echo "SVG_FONT_INLINER_BIN_A=$SVG_FONT_INLINER_BIN_A"
       echo "SVG_FONT_INLINER_BIN_B=$SVG_FONT_INLINER_BIN_B"
       echo "SUPPORTED_VERSIONS_JSON=$SUPPORTED_VERSIONS_JSON"
-      echo "PYFTSUBSET_BIN=$PYFTSUBSET_BIN"
+      echo "HB_SUBSET_BIN=$HB_SUBSET_BIN"
       echo "DG_TEST_TMP=$DG_TEST_TMP"
       echo "use: run-test tests/<name>.test.mjs"
     '';

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {
   assertFailure,
   assertSuccess,
+  runSvgFontInliner,
   runSvgToPng,
   writeArtifact,
   writeBytesArtifact,
@@ -48,6 +49,19 @@ assert.notDeepEqual(
   defaultRes.stdout,
   "background: expected output bytes to differ from transparent default",
 );
+
+// An embedded font with a unicode-range is subset to its range for rendering
+const inlined = await runSvgFontInliner({
+  stdin: "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"30\"><text x=\"5\" y=\"20\" font-family=\"sans-serif\">Abc</text></svg>",
+});
+assertSuccess(inlined);
+const unicodeRangeSvg = inlined.stdout.replace("@font-face {", "@font-face {\n  unicode-range: U+0020-007E;");
+assert.notEqual(unicodeRangeSvg, inlined.stdout, "unicode-range: expected an embedded font face");
+const unicodeRangeRes = await runSvgToPng({ stdin: unicodeRangeSvg });
+await writeArtifact("svg-to-png.unicode-range.stderr.txt", unicodeRangeRes.stderr);
+await writeBytesArtifact("svg-to-png.unicode-range.stdout.png", unicodeRangeRes.stdout);
+assertSuccess({ ...unicodeRangeRes, stdout: "" });
+assert.equal(unicodeRangeRes.stdout.subarray(0, 8).toString("hex"), "89504e470d0a1a0a", "unicode-range: png signature mismatch");
 
 const badBackgroundRes = await runSvgToPng({ args: ["--background", "not-a-color"], stdin: svg });
 await writeArtifact("svg-to-png.bad-background.stderr.txt", badBackgroundRes.stderr);
