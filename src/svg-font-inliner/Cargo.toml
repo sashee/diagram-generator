@@ -13,3 +13,7 @@ tempfile = "3"
 ttf-parser = "0.25"
 usvg = "0.49"
 quick-xml = "0.42"
+
+# xmlwriter 0.1.0 (used by usvg to write SVG) only escapes quotes in attribute values, see the vendored copy
+[patch.crates-io]
+xmlwriter = { path = "vendor/xmlwriter" }

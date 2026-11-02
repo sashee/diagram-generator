@@ -6,7 +6,7 @@ use lightningcss::printer::PrinterOptions;
 use lightningcss::rules::CssRule;
 use lightningcss::stylesheet::{ParserOptions, StyleSheet};
 use lightningcss::traits::ToCss;
-use svg_font_inliner::{embed_svg_fonts, FontQuery};
+use svg_font_inliner::{embed_svg_fonts, ensure_text_fonts_inline, FontQuery};
 
 fn fixture_font_path(file_name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -17,6 +17,20 @@ fn fixture_font_path(file_name: &str) -> PathBuf {
 
 fn fixture_font_bytes(file_name: &str) -> Vec<u8> {
     std::fs::read(fixture_font_path(file_name)).expect("fixture font should be readable")
+}
+
+// The embedded fonts are subsets: they are identified by their full name, which the fixtures have unique ("Fixture A")
+fn font_name(bytes: &[u8]) -> String {
+    let face = ttf_parser::Face::parse(bytes, 0).expect("embedded font should parse");
+    face.names()
+        .into_iter()
+        .find(|name| name.name_id == ttf_parser::name_id::FULL_NAME && name.is_unicode())
+        .and_then(|name| name.to_string())
+        .expect("embedded font should have a full name")
+}
+
+fn fixture_font_name(file_name: &str) -> String {
+    font_name(&fixture_font_bytes(file_name))
 }
 
 fn fixture_data_url(file_name: &str) -> String {
@@ -323,8 +337,8 @@ fn resolver_invalid_path_is_rejected() {
 #[test]
 fn inlines_font_a_when_resolver_returns_font_a() {
     let svg = svg_with_single_text("'FontA'");
-    let expected = fixture_font_bytes("font-a.ttf");
-    let not_expected = fixture_font_bytes("font-b.ttf");
+    let expected = fixture_font_name("font-a.ttf");
+    let not_expected = fixture_font_name("font-b.ttf");
     let font_path = fixture_font_path("font-a.ttf");
 
     let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
@@ -335,16 +349,16 @@ fn inlines_font_a_when_resolver_returns_font_a() {
         "expected at least one embedded font data URL"
     );
 
-    let (_, bytes) = decode_data_url(&urls[0]);
-    assert_eq!(bytes, expected, "expected font-a payload");
-    assert_ne!(bytes, not_expected, "did not expect font-b payload");
+    let name = font_name(&decode_data_url(&urls[0]).1);
+    assert_eq!(name, expected, "expected font-a payload");
+    assert_ne!(name, not_expected, "did not expect font-b payload");
 }
 
 #[test]
 fn inlines_font_b_when_resolver_returns_font_b() {
     let svg = svg_with_single_text("'FontB'");
-    let expected = fixture_font_bytes("font-b.ttf");
-    let not_expected = fixture_font_bytes("font-a.ttf");
+    let expected = fixture_font_name("font-b.ttf");
+    let not_expected = fixture_font_name("font-a.ttf");
     let font_path = fixture_font_path("font-b.ttf");
 
     let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
@@ -355,9 +369,9 @@ fn inlines_font_b_when_resolver_returns_font_b() {
         "expected at least one embedded font data URL"
     );
 
-    let (_, bytes) = decode_data_url(&urls[0]);
-    assert_eq!(bytes, expected, "expected font-b payload");
-    assert_ne!(bytes, not_expected, "did not expect font-a payload");
+    let name = font_name(&decode_data_url(&urls[0]).1);
+    assert_eq!(name, expected, "expected font-b payload");
+    assert_ne!(name, not_expected, "did not expect font-a payload");
 }
 
 #[test]
@@ -368,8 +382,8 @@ fn inlines_both_fonts_when_resolver_returns_both() {
 </svg>"#;
     let font_a_path = fixture_font_path("font-a.ttf");
     let font_b_path = fixture_font_path("font-b.ttf");
-    let font_a_bytes = fixture_font_bytes("font-a.ttf");
-    let font_b_bytes = fixture_font_bytes("font-b.ttf");
+    let font_a_name = fixture_font_name("font-a.ttf");
+    let font_b_name = fixture_font_name("font-b.ttf");
 
     let output = embed_svg_fonts(svg, move |query| {
         if query.families.iter().any(|f| f == "FontA") {
@@ -384,14 +398,14 @@ fn inlines_both_fonts_when_resolver_returns_both() {
 
     let decoded = extract_data_urls(&output)
         .into_iter()
-        .map(|url| decode_data_url(&url).1)
+        .map(|url| font_name(&decode_data_url(&url).1))
         .collect::<Vec<_>>();
     assert!(
-        decoded.iter().any(|bytes| bytes == &font_a_bytes),
+        decoded.iter().any(|bytes| bytes == &font_a_name),
         "expected font-a bytes among embedded payloads"
     );
     assert!(
-        decoded.iter().any(|bytes| bytes == &font_b_bytes),
+        decoded.iter().any(|bytes| bytes == &font_b_name),
         "expected font-b bytes among embedded payloads"
     );
 }
@@ -421,7 +435,7 @@ fn family_order_preference_is_usable_by_resolver() {
     let observed_queries: Arc<Mutex<Vec<FontQuery>>> = Arc::new(Mutex::new(Vec::new()));
     let observed_for_resolver = Arc::clone(&observed_queries);
     let font_b_path = fixture_font_path("font-b.ttf");
-    let font_b_bytes = fixture_font_bytes("font-b.ttf");
+    let font_b_name = fixture_font_name("font-b.ttf");
 
     let output = embed_svg_fonts(&svg, move |query| {
         observed_for_resolver
@@ -455,10 +469,10 @@ fn family_order_preference_is_usable_by_resolver() {
 
     let decoded = extract_data_urls(&output)
         .into_iter()
-        .map(|url| decode_data_url(&url).1)
+        .map(|url| font_name(&decode_data_url(&url).1))
         .collect::<Vec<_>>();
     assert!(
-        decoded.iter().any(|bytes| bytes == &font_b_bytes),
+        decoded.iter().any(|bytes| bytes == &font_b_name),
         "expected FontB payload in output"
     );
 }
@@ -539,8 +553,8 @@ fn primary_font_a_then_fallback_for_b_inlines_a_and_b() {
     let queries_for_resolver = Arc::clone(&queries);
     let font_a_path = fixture_font_path("font-a.ttf");
     let font_b_path = fixture_font_path("font-b.ttf");
-    let font_a_bytes = fixture_font_bytes("font-a.ttf");
-    let font_b_bytes = fixture_font_bytes("font-b.ttf");
+    let font_a_name = fixture_font_name("font-a.ttf");
+    let font_b_name = fixture_font_name("font-b.ttf");
 
     let output = embed_svg_fonts(svg, move |query| {
         queries_for_resolver
@@ -565,10 +579,10 @@ fn primary_font_a_then_fallback_for_b_inlines_a_and_b() {
 
     let decoded = extract_data_urls(&output)
         .into_iter()
-        .map(|url| decode_data_url(&url).1)
+        .map(|url| font_name(&decode_data_url(&url).1))
         .collect::<Vec<_>>();
-    assert!(decoded.iter().any(|bytes| bytes == &font_a_bytes));
-    assert!(decoded.iter().any(|bytes| bytes == &font_b_bytes));
+    assert!(decoded.iter().any(|bytes| bytes == &font_a_name));
+    assert!(decoded.iter().any(|bytes| bytes == &font_b_name));
 }
 
 #[test]
@@ -579,9 +593,9 @@ fn fallback_can_chain_to_c() {
     let font_a_path = fixture_font_path("font-a.ttf");
     let font_b_path = fixture_font_path("font-b.ttf");
     let font_c_path = fixture_font_path("font-c.ttf");
-    let font_a_bytes = fixture_font_bytes("font-a.ttf");
-    let font_b_bytes = fixture_font_bytes("font-b.ttf");
-    let font_c_bytes = fixture_font_bytes("font-c.ttf");
+    let font_a_name = fixture_font_name("font-a.ttf");
+    let font_b_name = fixture_font_name("font-b.ttf");
+    let font_c_name = fixture_font_name("font-c.ttf");
 
     let output = embed_svg_fonts(svg, move |query| {
         queries_for_resolver
@@ -604,11 +618,11 @@ fn fallback_can_chain_to_c() {
 
     let decoded = extract_data_urls(&output)
         .into_iter()
-        .map(|url| decode_data_url(&url).1)
+        .map(|url| font_name(&decode_data_url(&url).1))
         .collect::<Vec<_>>();
-    assert!(decoded.iter().any(|bytes| bytes == &font_a_bytes));
-    assert!(decoded.iter().any(|bytes| bytes == &font_b_bytes));
-    assert!(decoded.iter().any(|bytes| bytes == &font_c_bytes));
+    assert!(decoded.iter().any(|bytes| bytes == &font_a_name));
+    assert!(decoded.iter().any(|bytes| bytes == &font_b_name));
+    assert!(decoded.iter().any(|bytes| bytes == &font_c_name));
 }
 
 #[test]
@@ -1144,7 +1158,7 @@ fn output_wide_invariant_removes_original_and_generic_families_and_local_src() {
 #[test]
 fn existing_font_face_with_mixed_src_uses_data_url() {
     let data_url = fixture_data_url("font-a.ttf");
-    let expected_bytes = fixture_font_bytes("font-a.ttf");
+    let expected_name = fixture_font_name("font-a.ttf");
     let svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
   <defs>
@@ -1168,11 +1182,11 @@ fn existing_font_face_with_mixed_src_uses_data_url() {
 
     let decoded = extract_data_urls(&output)
         .into_iter()
-        .map(|url| decode_data_url(&url).1)
+        .map(|url| font_name(&decode_data_url(&url).1))
         .collect::<Vec<_>>();
 
     assert!(
-        decoded.iter().any(|bytes| bytes == &expected_bytes),
+        decoded.iter().any(|bytes| bytes == &expected_name),
         "expected to reuse bytes from data URL source"
     );
 }
@@ -1181,8 +1195,8 @@ fn existing_font_face_with_mixed_src_uses_data_url() {
 fn existing_font_face_with_multiple_data_urls_uses_first_valid_data_url() {
     let first_data_url = fixture_data_url("font-a.ttf");
     let second_data_url = fixture_data_url("font-b.ttf");
-    let first_bytes = fixture_font_bytes("font-a.ttf");
-    let second_bytes = fixture_font_bytes("font-b.ttf");
+    let first_name = fixture_font_name("font-a.ttf");
+    let second_name = fixture_font_name("font-b.ttf");
     let svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="80">
   <defs>
@@ -1206,14 +1220,14 @@ fn existing_font_face_with_multiple_data_urls_uses_first_valid_data_url() {
 
     let decoded = extract_data_urls(&output)
         .into_iter()
-        .map(|url| decode_data_url(&url).1)
+        .map(|url| font_name(&decode_data_url(&url).1))
         .collect::<Vec<_>>();
     assert!(
-        decoded.iter().any(|bytes| bytes == &first_bytes),
+        decoded.iter().any(|bytes| bytes == &first_name),
         "expected first data URL payload to be used"
     );
     assert!(
-        !decoded.iter().any(|bytes| bytes == &second_bytes),
+        !decoded.iter().any(|bytes| bytes == &second_name),
         "did not expect later data URL payload to be selected"
     );
 }
@@ -2426,7 +2440,7 @@ fn dedupe_key_includes_descriptors_not_just_family() {
 fn unicode_range_multiple_faces_same_descriptor_are_merged_deterministically() {
     let font_b_data = fixture_data_url("font-b.ttf");
     let font_c_data = fixture_data_url("font-c.ttf");
-    let font_c_bytes = fixture_font_bytes("font-c.ttf");
+    let font_c_name = fixture_font_name("font-c.ttf");
     let svg = format!(
         r#"<svg xmlns="http://www.w3.org/2000/svg" width="260" height="80">
   <defs>
@@ -2469,10 +2483,10 @@ fn unicode_range_multiple_faces_same_descriptor_are_merged_deterministically() {
 
     let decoded = extract_data_urls(&out1)
         .into_iter()
-        .map(|url| decode_data_url(&url).1)
+        .map(|url| font_name(&decode_data_url(&url).1))
         .collect::<Vec<_>>();
     assert!(
-        decoded.iter().any(|bytes| bytes == &font_c_bytes),
+        decoded.iter().any(|bytes| bytes == &font_c_name),
         "expected merged output to include payload with full ABC coverage"
     );
 }
@@ -2568,7 +2582,8 @@ fn ligature_like_text_keeps_synthetic_family_output() {
     let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="220" height="60">
   <text x="10" y="40" font-family="sans-serif">fi</text>
 </svg>"#;
-    let font_path = fixture_font_path("font-a.ttf");
+    // DejaVu Sans subset with f, i and the "fi" ligature (liga feature)
+    let font_path = fixture_font_path("font-fi.ttf");
 
     let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
         .expect("embedding should succeed with ligature-like text");
@@ -2650,19 +2665,12 @@ fn emoji_zwj_sequence_without_coverage_returns_clear_error() {
 </svg>"#;
     let font_path = fixture_font_path("font-a.ttf");
 
-    match embed_svg_fonts(svg, move |_query| Ok(font_path.clone())) {
-        Ok(output) => {
-            assert!(output.contains("@font-face"));
-            assert!(!output.contains("sans-serif"));
-        }
-        Err(err) => {
-            assert!(
-                err.contains("missing_char")
-                    || err.contains("failed to map normalized span fallback request"),
-                "expected explicit fallback-mapping failure, got: {err}"
-            );
-        }
-    }
+    let err = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect_err("emoji without a covering font should fail");
+    assert!(
+        err.contains("no font provides U+1F468"),
+        "expected explicit missing glyph error, got: {err}"
+    );
 }
 
 #[test]
@@ -2673,10 +2681,10 @@ fn variation_selector_or_combining_mark_without_coverage_returns_clear_error() {
     let font_path = fixture_font_path("font-a.ttf");
 
     let err = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
-        .expect_err("unsupported combining-mark sequence should currently fail clearly");
+        .expect_err("unsupported combining-mark sequence should fail clearly");
     assert!(
-        err.contains("failed to map normalized span fallback request"),
-        "expected explicit fallback-mapping failure, got: {err}"
+        err.contains("no font provides U+0301"),
+        "expected explicit missing glyph error, got: {err}"
     );
 }
 
@@ -2781,4 +2789,218 @@ fn ids_with_markup_characters_stay_valid_xml() {
     assert!(doc
         .descendants()
         .any(|node| node.attribute("id") == Some("a<b&c>d\"e")));
+}
+
+#[test]
+fn character_without_any_covering_font_fails_with_its_code_point() {
+    // font-a only has "A", and the resolver offers nothing else
+    let svg = svg_with_single_text("'FontA'").replace(">A<", ">AB<");
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let err = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+        .expect_err("a character without a covering font should fail");
+    assert_eq!(
+        err,
+        "no font provides U+0042 'B' (requested families: FontA)"
+    );
+}
+
+#[test]
+fn ignorable_characters_need_no_covering_font() {
+    let svg = svg_with_single_text("'FontA'").replace(">A<", ">A\u{200B}A\u{FE0F}<");
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+        .expect("zero-width space and variation selector should not need a font");
+    assert!(output.contains("@font-face"));
+}
+
+#[test]
+fn inline_check_names_the_character_without_an_inlined_font() {
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><style>@font-face {{ font-family: "Inlined"; src: url({}) format("truetype"); }}</style><text x="10" y="40" font-family="Inlined">AB</text></svg>"#,
+        fixture_data_url("font-a.ttf")
+    );
+
+    let err = ensure_text_fonts_inline(&svg).expect_err("B is not in the inlined font");
+    assert_eq!(err, "no font inlined in the SVG provides U+0042 'B'");
+}
+
+#[test]
+fn literal_entity_text_in_ids_round_trips() {
+    // the id is the literal text `a &quot; b`, not a quote
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><g id="a &amp;quot; b"><text x="10" y="40" font-family="'FontA'">A</text></g></svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+    let doc = roxmltree::Document::parse(&output).expect("output should be valid XML");
+    assert!(doc
+        .descendants()
+        .any(|node| node.attribute("id") == Some("a &quot; b")));
+}
+
+#[test]
+fn nested_svg_images_stay_valid_xml() {
+    // usvg writes nested SVG images itself, base64-encoded into the image href
+    let nested = r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><g id="x&lt;y&amp;z" opacity="0.5"><rect width="10" height="10" fill="red"/></g></svg>"#;
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><image width="10" height="10" href="data:image/svg+xml;base64,{}"/><text x="10" y="40" font-family="'FontA'">A</text></svg>"#,
+        base64::engine::general_purpose::STANDARD.encode(nested)
+    );
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+    let doc = roxmltree::Document::parse(&output).expect("output should be valid XML");
+    let href = doc
+        .descendants()
+        .find_map(|node| {
+            node.attribute(("http://www.w3.org/1999/xlink", "href"))
+                .or_else(|| node.attribute("href"))
+                .filter(|href| href.starts_with("data:image/svg+xml"))
+        })
+        .expect("output should keep the nested svg image");
+    let nested_bytes = base64::engine::general_purpose::STANDARD
+        .decode(href.split_once(',').expect("data URL").1.trim())
+        .expect("nested image should be base64");
+    let nested_svg = String::from_utf8(nested_bytes).expect("nested svg should be UTF-8");
+    let nested_doc =
+        roxmltree::Document::parse(&nested_svg).expect("nested svg should be valid XML");
+    assert!(nested_doc
+        .descendants()
+        .any(|node| node.attribute("id") == Some("x<y&z")));
+}
+
+#[test]
+fn root_keeps_view_box_and_presentation_attributes() {
+    let embed = |svg: &str| {
+        let font_path = fixture_font_path("font-a.ttf");
+        embed_svg_fonts(svg, move |_query| Ok(font_path.clone())).expect("embedding should succeed")
+    };
+
+    // PlantUML-like root
+    let output = embed(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="65px" height="111px" viewBox="0 0 65 111" preserveAspectRatio="none" data-diagram-type="SEQUENCE" style="width:65px;height:111px;background:#FFFFFF;"><text x="10" y="40" font-family="'FontA'">A</text></svg>"#,
+    );
+    let doc = roxmltree::Document::parse(&output).expect("output should be valid XML");
+    let root = doc.root_element();
+    assert_eq!(root.attribute("viewBox"), Some("0 0 65 111"));
+    assert_eq!(root.attribute("preserveAspectRatio"), Some("none"));
+    assert_eq!(root.attribute("data-diagram-type"), Some("SEQUENCE"));
+    assert_eq!(root.attribute("style"), Some("background:#FFFFFF"));
+
+    // Graphviz-like root in pt: the viewBox follows the written (px) size
+    let output = embed(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="62pt" height="116pt" viewBox="0.00 0.00 62.00 116.00"><text x="10" y="40" font-family="'FontA'">A</text></svg>"#,
+    );
+    let doc = roxmltree::Document::parse(&output).expect("output should be valid XML");
+    let root = doc.root_element();
+    let (width, height) = (
+        root.attribute("width").unwrap(),
+        root.attribute("height").unwrap(),
+    );
+    assert!(
+        !width.ends_with("pt"),
+        "width should be written in px, got {width}"
+    );
+    assert_eq!(
+        root.attribute("viewBox"),
+        Some(format!("0 0 {width} {height}").as_str())
+    );
+}
+
+#[test]
+fn embedded_fonts_are_subset_to_the_used_characters() {
+    // font-c has A, B and C
+    let svg = svg_with_single_text("'FontC'");
+    let font_path = fixture_font_path("font-c.ttf");
+
+    let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+    let urls = extract_data_urls(&output);
+    assert_eq!(urls.len(), 1);
+    let bytes = decode_data_url(&urls[0]).1;
+    let face = ttf_parser::Face::parse(&bytes, 0).expect("embedded font should parse");
+    assert!(
+        face.glyph_index('A').is_some(),
+        "the used character should be kept"
+    );
+    assert!(
+        face.glyph_index('B').is_none(),
+        "unused characters should be dropped"
+    );
+    assert!(
+        face.glyph_index('C').is_none(),
+        "unused characters should be dropped"
+    );
+}
+
+#[test]
+fn small_caps_keep_the_capitals() {
+    // font-case has A, B, a and b. Browsers draw small caps as scaled capitals when a font has no feature for them.
+    let embeds_capitals = |font_variant: &str| {
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><text x="10" y="40" font-family="'FontCase'"{font_variant}>ab</text></svg>"#
+        );
+        let font_path = fixture_font_path("font-case.ttf");
+        let output = embed_svg_fonts(&svg, move |_query| Ok(font_path.clone()))
+            .expect("embedding should succeed");
+        let urls = extract_data_urls(&output);
+        assert_eq!(urls.len(), 1);
+        let bytes = decode_data_url(&urls[0]).1;
+        let face = ttf_parser::Face::parse(&bytes, 0).expect("embedded font should parse");
+        assert!(face.glyph_index('a').is_some() && face.glyph_index('b').is_some());
+        face.glyph_index('A').is_some() && face.glyph_index('B').is_some()
+    };
+    assert!(embeds_capitals(r#" font-variant="small-caps""#));
+    assert!(!embeds_capitals(""));
+}
+
+#[test]
+fn variable_font_is_embedded_once_for_all_its_weights() {
+    // font-variable is a Noto Sans subset (A, B) with its wght axis (100-900)
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="90"><text x="10" y="30" font-family="'VarFont'" font-weight="400">A</text><text x="10" y="70" font-family="'VarFont'" font-weight="700">B</text></svg>"#;
+    let font_path = fixture_font_path("font-variable.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+    assert_eq!(
+        output.matches("@font-face").count(),
+        1,
+        "expected one face for both weights"
+    );
+    assert!(
+        output.contains("font-weight: 100 900;"),
+        "expected the axis range as weight"
+    );
+    assert_eq!(output_font_face_families(&output).len(), 1);
+    let span_families = output_font_families(&output)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        span_families.len(),
+        1,
+        "both weights should use the one face"
+    );
+}
+
+#[test]
+fn static_fonts_keep_one_face_per_weight() {
+    // the static fixtures are separate Regular (400) and Bold (700) files
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="90"><text x="10" y="30" font-family="'Static'" font-weight="400">A</text><text x="10" y="70" font-family="'Static'" font-weight="700">A</text></svg>"#;
+    let regular = fixture_font_path("static-regular.ttf");
+    let bold = fixture_font_path("static-bold.ttf");
+
+    let output = embed_svg_fonts(svg, move |query| {
+        Ok(if query.weight >= 600 {
+            bold.clone()
+        } else {
+            regular.clone()
+        })
+    })
+    .expect("embedding should succeed");
+    assert_eq!(output.matches("@font-face").count(), 2);
+    assert!(output.contains("font-weight: 400;"));
+    assert!(output.contains("font-weight: 700;"));
 }

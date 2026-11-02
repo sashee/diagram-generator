@@ -16,6 +16,7 @@ Current grouped tests:
 - `tests/contract-render-matrix.test.mjs`
 - `tests/contract-dot-svg-links.test.mjs`
 - `tests/contract-environment-isolation.test.mjs`
+- `tests/contract-missing-glyph.test.mjs`
 - `tests/contract-font-inline.test.mjs`
 - `tests/contract-fontconfig-wiring.test.mjs`
 - `tests/contract-svg-to-png-cli.test.mjs`

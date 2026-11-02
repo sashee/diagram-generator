@@ -356,6 +356,7 @@ await runWithConcurrency(jobs, 5, async ({ renderer, name, code, expectedSvgText
     const svg = assertSingleSuccessfulOutput({ item: parsed[0], renderer, format: "svg" });
     assert(svg.includes("<svg"), `${renderer}: expected <svg in output`);
     assert(svg.includes("</svg>"), `${renderer}: expected </svg> in output`);
+    assert(/^<svg[^>]*\sviewBox="0 0 /.test(svg), `${renderer}: expected a viewBox on the root, so the svg scales`);
     if (expectedSvgText) {
       assert(svg.includes(expectedSvgText), `${renderer}: expected "${expectedSvgText}" in the ${name} svg`);
     }

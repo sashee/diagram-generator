@@ -50,9 +50,10 @@ pkgs.rustPlatform.buildRustPackage {
   postFixup = ''
     mv $out/bin/svg-to-png $out/bin/.svg-to-png-real
     makeWrapper ${sandbox_run}/bin/sandbox-run $out/bin/svg-to-png \
-      --add-flags "--keep-env SVG_FONT_EMBED_DEBUG" \
+      --add-flags "--keep-env SVG_FONT_EMBED_DEBUG --keep-env HB_SUBSET_BIN" \
       --add-flags -- \
       --set SVG_FONT_EMBED_DEBUG ${if debug then "1" else "0"} \
+      --set HB_SUBSET_BIN ${pkgs.harfbuzz.dev}/bin/hb-subset \
       --add-flags $out/bin/.svg-to-png-real
   '';
 }

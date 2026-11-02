@@ -14,7 +14,6 @@ pkgs.rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkgs.makeWrapper
     pkgs.fontconfig
-    pkgs.python3Packages.fonttools
   ];
 
   src = pkgs.nix-gitignore.gitignoreSourcePure [ ./.gitignore ] ./src/svg-font-inliner;
@@ -24,20 +23,20 @@ pkgs.rustPlatform.buildRustPackage {
 
   preCheck = ''
     export FONTCONFIG_FILE=${fontconfig}
-    export PYFTSUBSET_BIN=${pkgs.python3Packages.fonttools}/bin/pyftsubset
-    export PATH=${pkgs.lib.makeBinPath [pkgs.fontconfig pkgs.python3Packages.fonttools]}:$PATH
+    export HB_SUBSET_BIN=${pkgs.harfbuzz.dev}/bin/hb-subset
+    export PATH=${pkgs.lib.makeBinPath [pkgs.fontconfig]}:$PATH
   '';
 
   postFixup = ''
     mv $out/bin/svg-font-inliner $out/bin/.svg-font-inliner-real
 
     makeWrapper ${sandbox_run}/bin/sandbox-run $out/bin/svg-font-inliner \
-      --add-flags "--keep-env SVG_FONT_EMBED_DEBUG --keep-env FONTCONFIG_FILE --keep-env PYFTSUBSET_BIN" \
+      --add-flags "--keep-env SVG_FONT_EMBED_DEBUG --keep-env FONTCONFIG_FILE --keep-env HB_SUBSET_BIN" \
       --add-flags -- \
       --add-flags $out/bin/.svg-font-inliner-real \
       --set SVG_FONT_EMBED_DEBUG ${if debug then "1" else "0"} \
       --set FONTCONFIG_FILE ${fontconfig} \
-      --set PYFTSUBSET_BIN ${pkgs.python3Packages.fonttools}/bin/pyftsubset \
-      --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.fontconfig pkgs.python3Packages.fonttools]}
+      --set HB_SUBSET_BIN ${pkgs.harfbuzz.dev}/bin/hb-subset \
+      --prefix PATH : ${pkgs.lib.makeBinPath [pkgs.fontconfig]}
   '';
 }
