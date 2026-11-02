@@ -2768,3 +2768,17 @@ fn comment_with_angle_brackets_and_apostrophe_is_accepted() {
         .expect("embedding should succeed");
     assert!(output.contains("@font-face"));
 }
+
+#[test]
+fn ids_with_markup_characters_stay_valid_xml() {
+    // PlantUML builds ids from entity names, e.g. `initial-to-{{salt{<b>Security checklist...`
+    let svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="60"><g id="a&lt;b&amp;c&gt;d&quot;e"><text x="10" y="40" font-family="'FontA'">A</text></g></svg>"#;
+    let font_path = fixture_font_path("font-a.ttf");
+
+    let output = embed_svg_fonts(svg, move |_query| Ok(font_path.clone()))
+        .expect("embedding should succeed");
+    let doc = roxmltree::Document::parse(&output).expect("output should be valid XML");
+    assert!(doc
+        .descendants()
+        .any(|node| node.attribute("id") == Some("a<b&c>d\"e")));
+}

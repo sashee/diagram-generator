@@ -1775,6 +1775,38 @@ fn markup_declaration_len(rest: &[u8]) -> Option<usize> {
     Some(opener.len() + body_len)
 }
 
+// usvg writes attribute values through xmlwriter, which only escapes the quote character: element ids built from
+// diagram text (e.g. PlantUML's `<b>` in an entity name) would make the output invalid XML. Text content is escaped.
+fn escape_written_attribute_values(svg: &str) -> String {
+    let mut out = String::with_capacity(svg.len());
+    let mut in_tag = false;
+    let mut in_value = false;
+    for (i, ch) in svg.char_indices() {
+        match (in_tag, in_value, ch) {
+            (true, true, '"') => {
+                in_value = false;
+                out.push(ch);
+            }
+            (true, true, '<') => out.push_str("&lt;"),
+            (true, true, '&') if !svg[i..].starts_with("&quot;") => out.push_str("&amp;"),
+            (true, false, '"') => {
+                in_value = true;
+                out.push(ch);
+            }
+            (true, false, '>') => {
+                in_tag = false;
+                out.push(ch);
+            }
+            (false, _, '<') => {
+                in_tag = true;
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 // The quote fix-up is only for SVGs with malformed attribute quoting, valid documents are passed through unchanged
 fn normalize_quotes_if_unparsable(svg: &str) -> Cow<'_, str> {
     match roxmltree::Document::parse(svg) {
@@ -2447,10 +2479,10 @@ where
         })
         .collect::<BTreeMap<_, _>>();
 
-    let normalized_svg = tree.to_string(&usvg::WriteOptions {
+    let normalized_svg = escape_written_attribute_values(&tree.to_string(&usvg::WriteOptions {
         preserve_text: true,
         ..usvg::WriteOptions::default()
-    });
+    }));
     let span_alias_lists = collect_span_alias_lists(
         &tree,
         &resolved_paths_snapshot,
@@ -2760,6 +2792,15 @@ mod tests {
         assert_eq!(
             normalize_inner_attribute_quotes_preserve_offsets(input),
             input
+        );
+    }
+
+    #[test]
+    fn escape_written_attribute_values_escapes_only_attribute_values() {
+        let written = "<g id=\"a<b&c>d&quot;e\"><text x=\"1\">x &amp; y &lt; z</text></g>";
+        assert_eq!(
+            escape_written_attribute_values(written),
+            "<g id=\"a&lt;b&amp;c>d&quot;e\"><text x=\"1\">x &amp; y &lt; z</text></g>"
         );
     }
 

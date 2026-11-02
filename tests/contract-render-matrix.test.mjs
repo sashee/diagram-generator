@@ -80,6 +80,40 @@ class "Map>Key<Bob's"
 `,
     },
     {
+      // PlantUML builds element ids from entity names, here from markup in the salt label
+      name: "salt-in-activity",
+      expectedSvgText: "Data encrypted?",
+      code: `
+@startuml
+
+(*) --> "
+{{
+salt
+{
+<b>Security checklist
+~~
+[] Data encrypted?
+~~
+}
+}}
+" as initial
+
+initial -down->[Enable SSE-S3] "
+{{
+salt
+{
+<b>Security checklist
+~~
+[X] Data encrypted?
+~~
+}
+}}
+"
+
+@enduml
+`,
+    },
+    {
       name: "simple-arrow",
       code: `
 @startuml
